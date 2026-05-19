@@ -1,0 +1,18 @@
+# REFER: https://bun.com/docs/runtime/bunfig
+telemetry = false
+
+[install]
+exact = true
+saveTextLockfile = true
+auto = "auto"
+globalStore = true
+
+[run]
+bun = true
+elide-lines = 0
+
+[test]
+randomize = true
+coverageSkipTestFiles = true
+coverageReporter = ["text", "lcov"]
+coverageDir = "./.coverage"

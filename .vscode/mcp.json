@@ -1,0 +1,34 @@
+{
+	"inputs": [
+		{
+			"id": "konnectToken",
+			"type": "promptString",
+			"description": "Konnect API token (kpat_...)",
+			"password": true
+		},
+		{
+			"id": "konnectControlPlaneId",
+			"type": "promptString",
+			"description": "Konnect control plane UUID"
+		},
+		{
+			"id": "konnectRegion",
+			"type": "promptString",
+			"description": "Konnect region (us / eu / au / me / in / sg)",
+			"default": "us"
+		}
+	],
+	"servers": {
+		"kongcheck": {
+			"type": "stdio",
+			"command": "bun",
+			"args": ["run", "src/cli.ts", "mcp"],
+			"env": {
+				"KONNECT_TOKEN": "${input:konnectToken}",
+				"KONNECT_CONTROL_PLANE_ID": "${input:konnectControlPlaneId}",
+				"KONNECT_REGION": "${input:konnectRegion}",
+				"NODE_TLS_REJECT_UNAUTHORIZED": "0"
+			}
+		}
+	}
+}

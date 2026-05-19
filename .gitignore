@@ -1,0 +1,10 @@
+.DS_Store
+node_modules
+dist/
+*.tgz
+.env
+.env.*
+.envrc
+.cache
+.coverage
+*.lcov

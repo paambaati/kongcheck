@@ -1,0 +1,1039 @@
+/**
+ * Kong Route Analyzer
+ *
+ * Performs static risk analysis over a set of marshalled routes and produces
+ * human-meaningful {@link Finding} objects.
+ *
+ * The analyzer covers three categories:
+ *
+ * 1. **Suspicious regex paths** – regex paths that use `*` as if it were a
+ *    glob wildcard. In PCRE, `*` is a quantifier on the *previous* token, not
+ *    "anything". Users frequently write `~/epp/*` expecting it to mean
+ *    "anything under /epp/", but it actually means "/epp" followed by zero or
+ *    more slashes – which can match unintended sibling paths.
+ *
+ * 2. **Shadowing / collision** – two or more routes match overlapping request
+ *    paths. The analyzer generates candidate request paths derived from the
+ *    routes' own path patterns and simulates each one to find collisions.
+ *
+ * 3. **Sibling namespace overlaps** – plain prefix or regex routes whose path
+ *    prefixes share a common stem (e.g. `/epp` and `/epp-poc`) where one
+ *    could be shadowed by the other.
+ *
+ * @see src/router.ts – compareRoutes, simulateRequest
+ */
+
+import { compareRoutes, marshalRoute, matchPath, simulateRequest } from './router.ts';
+import type { Finding, KonnectData, MarshalledRoute, RouterFlavor, Severity, SimRequest } from './types.ts';
+
+/**
+ * Patterns that indicate the user likely intended glob-style wildcards but
+ * wrote PCRE instead. Each entry is a human-readable description of the
+ * problem.
+ *
+ * Based on the motivating example in the problem statement: `~/epp/*` where
+ * `*` is used as a glob but has PCRE quantifier semantics (zero or more of
+ * the previous character).
+ */
+const SUSPICIOUS_REGEX_PATTERNS: Array<{
+	/** RegExp tested against the raw path string (without leading `~`). */
+	test: RegExp;
+	/** Human-readable description of the issue. */
+	description: string;
+	/** Suggested fix template. `{path}` is replaced with the cleaned path stem. */
+	suggestion: (raw: string) => string;
+}> = [
+	{
+		// ~/foo/* or ~/foo/bar/* — trailing `/*` is almost always a glob mistake.
+		test: /\/\*$/,
+		description:
+			"`*` at end of path is a PCRE quantifier (zero or more of the preceding char '/'), " +
+			"not a glob wildcard. It does NOT mean 'anything after this prefix'.",
+		suggestion: (raw: string) => {
+			// Remove leading ~, strip trailing /*, suggest anchored form.
+			const stem = raw.slice(1).replace(/\/\*$/, '');
+			return `~${stem}(?:/.*)?$`;
+		},
+	},
+	{
+		// ~/foo/* in the middle, e.g. ~/foo/*/bar
+		test: /\/\*\//,
+		description:
+			"`/*/` in a regex path uses `*` as a PCRE quantifier on '/', which matches zero or more " +
+			"slashes – not 'any path segment'. Consider using `/[^/]+/` for a single dynamic segment.",
+		suggestion: (raw: string) => raw.replace(/\/\*\//g, '/[^/]+/'),
+	},
+	{
+		// ~/foo* (no slash before *) – * quantifies the previous letter, e.g. 'o'
+		test: /[a-zA-Z0-9]\*$/,
+		description:
+			'Trailing `*` after a word character quantifies that character (zero or more occurrences), ' +
+			'not the whole path segment. E.g. `~/epp*` matches `/ep`, `/epp`, `/eppp`, etc., ' +
+			'but NOT `/epp/anything`.',
+		suggestion: (raw: string) => {
+			const stem = raw.slice(1).replace(/[a-zA-Z0-9]\*$/, (m) => m[0]!);
+			return `~${stem}(?:/.*)?$`;
+		},
+	},
+	{
+		// ~/?$ or ~/? or ~/ — optional-slash patterns that are universal matchers in
+		// traditional flavor. Without a leading ^ anchor (which traditional flavor does
+		// NOT add), `/?$` matches the END of any string, making it a catch-all for every
+		// path. Authors usually intend this to match only the root path `/`; they should
+		// use the plain path `/` (no `~`) or the anchored form `~^/$`.
+		//
+		// The test is applied to the raw path string (including the leading `~`), so we
+		// anchor after `~` with `^~`.
+		test: /^~\/?\??\$?$/,
+		description:
+			'This regex path is an unintentional universal matcher in `traditional` flavor. ' +
+			'`/?$` (and similar patterns) match the *end* of every URL because the `traditional` ' +
+			'router does not add a `^` start anchor. In `traditional_compatible` flavor this would ' +
+			'correctly match only the root path `/`. ' +
+			'Use the plain path `/` (no `~`) for a catch-all, or `~^/$` (anchored) to match only root.',
+		suggestion: (_raw: string) => '/',
+	},
+];
+
+/**
+ * Three deliberately unrelated probe paths used to detect "universal matcher"
+ * routes – routes whose paths match every possible request.
+ *
+ * A route is a universal matcher when ALL probe paths are matched by at least
+ * one of its path patterns. Such routes are intentional catch-alls (e.g. a
+ * SPA frontend served from `/`) and should not generate collision findings
+ * when they appear as the *loser* in a pair – being shadowed by every more-
+ * specific route is expected and correct behaviour.
+ */
+const UNIVERSAL_PROBE_PATHS = ['/api-probe-a/test', '/static-probe-b/app.js', '/zz-probe-c/deep/nested/path'] as const;
+
+/**
+ * Returns `true` when the route matches ALL universal probe paths, indicating
+ * that it is an intentional catch-all rather than a misconfigured route.
+ *
+ * Plain path `/` is always a universal matcher (every request starts with `/`).
+ * Regex paths that match everything (e.g. `~/?$` in traditional flavor) are
+ * detected via probe testing.
+ *
+ * @param mr - The marshalled route to test.
+ */
+function isUniversalMatcher(mr: MarshalledRoute): boolean {
+	return UNIVERSAL_PROBE_PATHS.every((probe) => mr.parsedPaths.some((p) => matchPath(p, probe)));
+}
+
+/**
+ * Inspects a single regex path string for known suspicious patterns.
+ *
+ * @param raw - The raw path string (must start with `~`).
+ * @returns An array of issue description strings. Empty if the path looks safe.
+ */
+export function detectSuspiciousRegexIssues(raw: string): string[] {
+	if (!raw.startsWith('~')) return [];
+	const issues: string[] = [];
+	for (const { test, description } of SUSPICIOUS_REGEX_PATTERNS) {
+		if (test.test(raw)) issues.push(description);
+	}
+	return issues;
+}
+
+/**
+ * Returns a safer suggested replacement for a suspicious regex path, or
+ * `undefined` if no specific suggestion is available.
+ *
+ * @param raw - The raw path string (must start with `~`).
+ */
+export function suggestRegexFix(raw: string): string | undefined {
+	if (!raw.startsWith('~')) return undefined;
+	for (const { test, suggestion } of SUSPICIOUS_REGEX_PATTERNS) {
+		if (test.test(raw)) return suggestion(raw);
+	}
+	return undefined;
+}
+
+/**
+ * Generates a diverse set of candidate request paths derived from the routes'
+ * own path patterns.
+ *
+ * The goal is to produce paths that are likely to trigger collisions between
+ * sibling routes –
+ *  - The base path itself (e.g. `/epp-poc/docs`)
+ *  - A child path (e.g. `/epp-poc/docs/sub`)
+ *  - A sibling path (e.g. `/epp-docs`)
+ *  - Slash/no-slash variants
+ *  - The parent path (e.g. `/epp-poc`)
+ *
+ * @param routes - All marshalled routes; their path patterns are used as seeds.
+ * @returns Deduplicated list of candidate {@link SimRequest} objects.
+ */
+export function generateCandidateRequests(routes: MarshalledRoute[]): SimRequest[] {
+	const pathSet = new Set<string>();
+
+	for (const mr of routes) {
+		for (const p of mr.parsedPaths) {
+			let base: string;
+
+			if (p.kind === 'regex') {
+				// Strip leading ~ and simplify regex metacharacters to a plain path.
+				base = (p.regexSource ?? '')
+					.replace(/\{[^}]+\}/g, 'id') // {variable} template placeholders → id
+					.replace(/\([^)]+\)/g, 'id') // (capture groups) → id placeholder
+					.replace(/\(\?P?<[^>]+>/g, '') // strip named group openers (remaining unclosed)
+					.replace(/\(\?:/g, '') // strip non-capturing group openers
+					.replace(/[()]/g, '') // strip remaining parens
+					.replace(/\?/g, '') // strip optional quantifiers
+					.replace(/\.\*/g, 'test') // .* → "test"
+					.replace(/\*/g, '') // remaining * → remove
+					.replace(/\+/g, '') // + → remove
+					.replace(/\$$/, '') // strip end anchor
+					.replace(/\^/, ''); // strip start anchor
+				// Ensure leading slash.
+				if (!base.startsWith('/')) base = '/' + base;
+			} else {
+				base = p.prefix ?? '/';
+			}
+
+			// Normalise double slashes.
+			base = base.replace(/\/+/g, '/');
+
+			pathSet.add(base);
+			// Trailing slash variant.
+			if (!base.endsWith('/')) pathSet.add(base + '/');
+			// Child path.
+			pathSet.add(base.replace(/\/$/, '') + '/extra');
+			// Parent path.
+			const parent = base.replace(/\/$/, '').replace(/\/[^/]+$/, '');
+			if (parent) pathSet.add(parent);
+		}
+	}
+
+	return Array.from(pathSet).map((path) => ({
+		method: 'GET',
+		host: 'example.com',
+		path,
+	}));
+}
+
+/**
+ * Options for the route analyzer.
+ */
+export interface AnalyzeOptions {
+	/**
+	 * Router flavor to use for analysis.
+	 * Defaults to the flavor detected from the control plane config, or
+	 * `"traditional"` if not detectable.
+	 */
+	flavor?: RouterFlavor;
+	/**
+	 * When `true`, include `INFO`-level findings: header-stratified route-pair
+	 * notices and universal catch-all route annotations.
+	 * `suspicious_regex` (MEDIUM/HIGH) and collision/shadowing findings are
+	 * always returned regardless of this flag.
+	 * Defaults to `true`.
+	 */
+	includeInfo?: boolean;
+}
+
+/**
+ * Analyses a set of routes fetched from Konnect and returns all findings.
+ *
+ * The analysis proceeds in three passes:
+ * 1. **Suspicious regex linting** – each regex path is scanned for known
+ *    anti-patterns (glob-style `*` usage).
+ * 2. **Collision simulation** – candidate requests are generated from the
+ *    routes' path patterns and each is simulated to find multi-match
+ *    collisions.
+ * 3. **Sibling namespace detection** – route pairs whose path prefixes share a
+ *    common stem are flagged as potential shadows even if candidate generation
+ *    didn't produce a specific colliding request.
+ *
+ * @param fetched - The normalised config fetched from Konnect (or loaded
+ *                  from a local dump).
+ * @param options - Analysis options.
+ * @returns All findings, sorted by severity (HIGH first).
+ *
+ * @example
+ * const findings = analyzeRoutes(fetchedConfig, { flavor: "traditional" });
+ * for (const f of findings) {
+ *   console.log(`[${f.severity}] ${f.type}: ${f.reason[0]}`);
+ * }
+ */
+export function analyzeRoutes(fetched: KonnectData, options: AnalyzeOptions = {}): Finding[] {
+	const flavor = options.flavor ?? fetched.routerFlavor ?? 'traditional';
+	const includeInfo = options.includeInfo ?? true;
+
+	// Marshal routes, splitting multi-path routes into one MarshalledRoute per
+	// path – mirroring Kong's own behaviour in `_M.new` (~L1430-L1449):
+	//   "split routes by paths to sort properly"
+	// After sorting, we deduplicate by route ID for display purposes (findings
+	// still reference the original KongRoute with all its paths).
+	const marshalledRoutes: MarshalledRoute[] = [];
+	for (const r of fetched.routes) {
+		const svc = r.service?.id ? fetched.services.get(r.service.id) : undefined;
+		const paths = r.paths ?? [];
+		if (paths.length <= 1) {
+			marshalledRoutes.push(marshalRoute(r, svc, flavor));
+		} else {
+			// One marshalled route per path; the route object is shared but each
+			// gets its own single-path slice so max_uri_length scores correctly.
+			for (const path of paths) {
+				const singlePathRoute = { ...r, paths: [path] };
+				marshalledRoutes.push(marshalRoute(singlePathRoute as typeof r, svc, flavor));
+			}
+		}
+	}
+
+	// Sort once – highest priority first.
+	const sorted = [...marshalledRoutes].sort(compareRoutes);
+
+	const findings: Finding[] = [];
+
+	// Pass 1: suspicious regex linting (always runs; emits MEDIUM/HIGH findings
+	// regardless of includeInfo – only INFO-severity passes are gated below).
+	findings.push(...lintSuspiciousRegex(sorted, flavor));
+
+	// Pass 2: collision simulation.
+	findings.push(...detectCollisions(sorted, flavor, includeInfo));
+
+	// Pass 3: sibling namespace detection (catches pairs not hit by simulation).
+	findings.push(...detectSiblingOverlaps(sorted, flavor, findings, includeInfo));
+
+	// Pass 4: universal-matcher annotation (INFO). Skip routes already flagged
+	// by suspicious_regex to avoid double-reporting an accidental catch-all.
+	const suspiciousIds = new Set(
+		findings.filter((f) => f.type === 'suspicious_regex').flatMap((f) => f.routes.map((r) => r.id)),
+	);
+	findings.push(...lintUniversalMatchers(sorted, flavor, suspiciousIds, includeInfo));
+
+	// Sort findings: HIGH > MEDIUM > LOW > INFO.
+	const severityOrder: Record<Severity, number> = {
+		HIGH: 0,
+		MEDIUM: 1,
+		LOW: 2,
+		INFO: 3,
+	};
+	findings.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+
+	return findings;
+}
+
+/**
+ * Annotates universal-matcher routes with INFO-level findings.
+ *
+ * A universal matcher is a route whose path(s) collectively match every
+ * request URL (e.g. a plain prefix `/`, or a regex that compiles to match
+ * anything). These routes are already excluded from collision/shadowing
+ * reporting to prevent noise; this pass surfaces them explicitly so users
+ * auditing their routing config know they exist.
+ *
+ * Routes that already have a `suspicious_regex` finding (accidental catch-alls
+ * like `~/?$`) are skipped here – they are reported at a higher severity
+ * and do not need a second finding.
+ *
+ * @param routes      - All marshalled routes, sorted by priority.
+ * @param flavor      - The active router flavor.
+ * @param skipIds     - Route IDs that already have a suspicious_regex finding.
+ * @param includeInfo - When `false`, returns an empty array immediately.
+ */
+function lintUniversalMatchers(
+	routes: MarshalledRoute[],
+	flavor: RouterFlavor,
+	skipIds: Set<string>,
+	includeInfo: boolean,
+): Finding[] {
+	if (!includeInfo) return [];
+	const findings: Finding[] = [];
+
+	for (const mr of routes) {
+		if (skipIds.has(mr.route.id)) continue;
+		if (!isUniversalMatcher(mr)) continue;
+
+		const paths = (mr.route.paths ?? []).join(', ') || '(no paths)';
+		findings.push({
+			severity: 'INFO',
+			type: 'universal_matcher',
+			routerFlavor: flavor,
+			routes: [mr.route],
+			samples: [],
+			reason: [
+				`Route "${mr.route.name ?? mr.route.id}" is a universal catch-all – it matches every request URL.`,
+				`Paths: ${paths}`,
+				'This route is intentionally excluded from collision and shadowing findings to avoid noise.',
+				'Common examples: a SPA frontend served from plain prefix `/`, or a default upstream.',
+				'If this catch-all is unexpected, review its path configuration.',
+			],
+			suggestions: [],
+		});
+	}
+
+	return findings;
+}
+
+/**
+ * Scans every regex path in the route set for suspicious patterns and emits
+ * `suspicious_regex` findings.
+ */
+function lintSuspiciousRegex(routes: MarshalledRoute[], flavor: RouterFlavor): Finding[] {
+	const findings: Finding[] = [];
+
+	for (const mr of routes) {
+		// Probe-based catch: emit a suspicious_regex finding for any regex route
+		// that compiles to a universal matcher (matches every probe path) but was
+		// not already caught by the pattern-list above. This catches patterns like
+		// `~.*` or `~.*$` that we haven't explicitly enumerated.
+		if (isUniversalMatcher(mr) && mr.parsedPaths.some((p) => p.kind === 'regex')) {
+			const alreadyCaught = mr.parsedPaths.some(
+				(p) => p.kind === 'regex' && detectSuspiciousRegexIssues(p.raw).length > 0,
+			);
+			if (!alreadyCaught) {
+				const universalPaths = mr.parsedPaths.filter((p) => p.kind === 'regex').map((p) => p.raw);
+				findings.push({
+					severity: 'HIGH',
+					type: 'suspicious_regex',
+					routerFlavor: flavor,
+					routes: [mr.route],
+					samples: [],
+					reason: [
+						`Route "${mr.route.name ?? mr.route.id}" has a regex path that matches every request URL ` +
+							`in \`${flavor}\` flavor – it is an accidental universal catch-all.`,
+						`Paths: ${universalPaths.join(', ')}`,
+						'In `traditional` flavor the router does not add a `^` start anchor, so patterns ' +
+							'like `~.*` or `~/.*` match any position in the URL string, not just the start.',
+						'This route will be shadowed by every more-specific route and silently handle ' +
+							'traffic intended for routes that are unavailable or misconfigured.',
+					],
+					suggestions: universalPaths.map(
+						(p) => p.replace(/^~/, '~/') + ' (review intent; likely should be a plain path prefix)',
+					),
+				});
+			}
+		}
+
+		for (const p of mr.parsedPaths) {
+			if (p.kind !== 'regex') continue;
+			const issues = detectSuspiciousRegexIssues(p.raw);
+			if (issues.length === 0) continue;
+
+			const fix = suggestRegexFix(p.raw);
+			findings.push({
+				severity: 'MEDIUM',
+				type: 'suspicious_regex',
+				routerFlavor: flavor,
+				routes: [mr.route],
+				samples: [],
+				reason: [
+					`Path "${p.raw}" uses regex syntax in a way that is likely unintentional:`,
+					...issues,
+					`Under ${flavor} flavor, this path is compiled as: ${p.regexSource}`,
+					'The `~` prefix means this is a PCRE regex path, not a glob pattern.',
+				],
+				suggestions: fix ? [fix] : [],
+			});
+		}
+	}
+
+	return findings;
+}
+
+/**
+ * Returns `true` when the loser route is a proper path-segment ancestor of the
+ * winner route — i.e. every loser plain-prefix path ends at a `/` boundary
+ * inside every winner plain-prefix path.
+ *
+ * Example: loser=/chat, winner=/chat/history → `/chat/history`.startsWith(`/chat/`) → true.
+ * Example: loser=/epp, winner=/epp-poc → `/epp-poc`.startsWith(`/epp/`) → false.
+ *
+ * This identifies legitimate parent→child routing hierarchies that are handled
+ * correctly and deterministically by Kong's max_uri_length tie-breaker. Only
+ * applies when both routes have exclusively plain-prefix paths.
+ */
+function isHierarchicalChild(winner: MarshalledRoute, loser: MarshalledRoute): boolean {
+	const loserPrefixes = loser.parsedPaths.filter((p) => p.kind === 'prefix').map((p) => p.prefix!);
+	const winnerPrefixes = winner.parsedPaths.filter((p) => p.kind === 'prefix').map((p) => p.prefix!);
+	// Only applies when both routes are exclusively plain-prefix (no regex paths).
+	if (loserPrefixes.length === 0 || winnerPrefixes.length === 0) return false;
+	if (loserPrefixes.length !== loser.parsedPaths.length) return false;
+	if (winnerPrefixes.length !== winner.parsedPaths.length) return false;
+	// Every loser prefix must be a proper path-segment ancestor of every winner prefix.
+	// Strip any trailing '/' from the loser prefix before appending '/' to avoid double-slash
+	// when the loser path itself ends with '/' (e.g. /ava-live-agent-api/).
+	return loserPrefixes.every((lp) => winnerPrefixes.every((wp) => wp.startsWith(lp.replace(/\/$/, '') + '/')));
+}
+
+/**
+ * Generates candidate requests, simulates each against the route set, and
+ * emits findings for any request that is matched by more than one route.
+ */
+function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, includeInfo: boolean): Finding[] {
+	const candidates = generateCandidateRequests(sorted);
+	// Deduplicate findings by route-pair key to avoid repeating the same pair
+	// for many similar requests.
+	const seenPairs = new Set<string>();
+	const findings: Finding[] = [];
+
+	for (const req of candidates) {
+		const result = simulateRequest(sorted, req);
+		if (result.matchedRoutes.length < 2) continue;
+
+		const winner = result.winner!;
+		const losers = result.matchedRoutes.slice(1);
+
+		for (const loser of losers) {
+			// Skip: loser is a universal-match (intentional catch-all like path `/`
+			// or regex `~/?$`). Being shadowed by every more-specific route is the
+			// expected behaviour for a catch-all; flagging it generates O(n) noise.
+			if (isUniversalMatcher(loser)) continue;
+
+			// Skip: loser is a proper path-segment ancestor of the winner
+			// (e.g. /chat vs /chat/history). Kong's max_uri_length tie-breaker
+			// resolves this deterministically; flagging it is a false positive.
+			if (isHierarchicalChild(winner, loser)) continue;
+
+			// Skip: winner and loser are the same route (multi-path route split into multiple
+			// MarshalledRoutes that share the same route ID). One path can be a prefix/subset
+			// of another path on the same route — this is not a collision, it's intentional.
+			if (winner.route.id === loser.route.id) continue;
+
+			// Skip: winner has {variable} template placeholders in its regex path. In PCRE,
+			// {id} is a literal match for the string "{id}", not a wildcard. No real HTTP
+			// request sends "{var}" unencoded in a URL path, so these routes effectively never
+			// match real traffic and cannot shadow anything.
+			if (winner.parsedPaths.some((p) => p.kind === 'regex' && /\{[^}]+\}/.test(p.regexSource ?? ''))) continue;
+
+			const pairKey = [winner.route.id, loser.route.id].sort().join('|');
+			if (seenPairs.has(pairKey)) {
+				// Already have a finding for this pair; add this sample to it.
+				const existing = findings.find((f) => {
+					const ids = f.routes
+						.map((r) => r.id)
+						.sort()
+						.join('|');
+					return ids === pairKey;
+				});
+				if (existing && !existing.samples.includes(req.path)) {
+					existing.samples.push(req.path);
+				}
+				continue;
+			}
+			seenPairs.add(pairKey);
+
+			// INFO/MEDIUM: identical-path, header-stratified pair.
+			// 'stratified' → Kong partitions traffic correctly; emit INFO notice.
+			// 'regex-opaque' → cannot determine disjointness statically; emit MEDIUM
+			if (haveIdenticalPaths(winner, loser)) {
+				const stratification = isHeaderStratified(winner, loser);
+				if (stratification === 'stratified') {
+					if (includeInfo) findings.push(buildHeaderStratifiedFinding(winner, loser, req.path, flavor));
+					continue;
+				}
+				if (stratification === 'regex-opaque') {
+					findings.push(buildRegexHeaderOpaqueFinding(winner, loser, req.path, flavor));
+					seenPairs.add(pairKey);
+					continue;
+				}
+			}
+
+			const severity = classifyCollisionSeverity(winner, loser);
+			const reason = buildCollisionReason(winner, loser, req.path, flavor);
+			const suggestions = buildCollisionSuggestions(winner, loser);
+
+			findings.push({
+				severity,
+				type: isShadowing(winner, loser) ? 'shadowing' : 'collision',
+				routerFlavor: flavor,
+				routes: [winner.route, loser.route],
+				samples: [req.path],
+				winnerId: winner.route.id,
+				reason,
+				suggestions,
+			});
+		}
+	}
+
+	return findings;
+}
+
+/**
+ * Determines whether the relationship between a winning and a losing route
+ * constitutes "shadowing" (winner can capture requests clearly intended for
+ * loser) vs a general "collision" (both routes overlap but neither obviously
+ * subsumes the other).
+ */
+function isShadowing(winner: MarshalledRoute, loser: MarshalledRoute): boolean {
+	// If the winner has a broad regex that can match all of the loser's paths,
+	// it is shadowing the loser.
+	for (const winnerPath of winner.parsedPaths) {
+		if (winnerPath.kind !== 'regex') continue;
+		for (const loserPath of loser.parsedPaths) {
+			// The loser's path pattern, when used as a sample, matches the winner.
+			const loserSample = loserPath.prefix ?? loserPath.regexSource ?? '';
+			if (loserSample && matchPath(winnerPath, loserSample)) return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Returns true when the two routes have exactly the same set of path strings
+ * (order-independent). Used to detect duplicate routes and header-gated env
+ * routing pairs.
+ */
+function haveIdenticalPaths(a: MarshalledRoute, b: MarshalledRoute): boolean {
+	const aPaths = (a.route.paths ?? []).slice().sort().join('|');
+	const bPaths = (b.route.paths ?? []).slice().sort().join('|');
+	return aPaths === bPaths;
+}
+
+/**
+ * Inspects a header constraint value list to determine whether it contains any
+ * `~*`-prefixed regex values.
+ *
+ * Kong header values starting with `~*` are PCRE patterns. Static analysis
+ * cannot determine whether two arbitrary regex patterns are disjoint — that
+ * would require regular-language intersection testing (PCRE product automaton).
+ * When a `~*` value is present we therefore cannot safely classify the pair as
+ * fully stratified or as a genuine collision.
+ */
+function hasRegexHeaderValue(values: string[]): boolean {
+	return values.some((v) => v.startsWith('~*'));
+}
+
+/**
+ * Classifies the header-constraint relationship between two routes.
+ *
+ * Returns:
+ * - `'stratified'`    – winner's headers partition traffic; loser handles the
+ *                        remainder. No misrouting.
+ * - `'regex-opaque'`  – one or more header values use `~*` PCRE patterns; static
+ *                        analysis cannot determine disjointness. The finding is
+ *                        downgraded to MEDIUM to signal the uncertainty.
+ * - `false`           – the constraints overlap (or the winner has no constraints);
+ *                        a genuine collision may exist.
+ *
+ * Only meaningful when the two routes share identical paths (see callers).
+ *
+ * Kong source (header matching, `header_pattern` construction) –
+ *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L400-L412
+ */
+function isHeaderStratified(winner: MarshalledRoute, loser: MarshalledRoute): 'stratified' | 'regex-opaque' | false {
+	const winHeaders = winner.route.headers;
+	if (!winHeaders || Object.keys(winHeaders).length === 0) return false;
+
+	const loseHeaders = loser.route.headers ?? {};
+
+	// Track whether we encounter any ~* regex values while scanning.
+	// We complete the full scan before returning regex-opaque so that a
+	// definitively stratified dimension (no constraint on the loser side)
+	// takes precedence — stratified is more informative than regex-opaque.
+	let foundRegexHeader = false;
+
+	for (const [headerName, winValues] of Object.entries(winHeaders)) {
+		// Find the matching key in the loser's constraints (case-insensitive).
+		const loseKey = Object.keys(loseHeaders).find((k) => k.toLowerCase() === headerName.toLowerCase());
+		const loseValues = loseKey ? loseHeaders[loseKey] : undefined;
+
+		if (!loseValues) {
+			// Loser has no constraint on this header — requests without the header
+			// go exclusively to the loser. Fully stratified on this dimension.
+			return 'stratified';
+		}
+
+		// Both constrain the same header.
+		// Check for ~* regex values on either side — static disjointness cannot
+		// be determined; flag as opaque and continue scanning.
+		if (hasRegexHeaderValue(winValues) || hasRegexHeaderValue(loseValues)) {
+			foundRegexHeader = true;
+			continue; // might still find a definitively stratified dimension
+		}
+
+		// Check whether their allowed values are disjoint.
+		const winSet = new Set(winValues.map((v) => v.toLowerCase()));
+		const hasOverlap = loseValues.some((v) => winSet.has(v.toLowerCase()));
+		if (!hasOverlap) return 'stratified'; // non-overlapping plain values → stratified
+	}
+
+	if (foundRegexHeader) return 'regex-opaque';
+	return false;
+}
+
+/**
+ * Builds an INFO-level finding for a route pair that is correctly stratified
+ * by a header constraint.
+ *
+ * The finding documents exactly which header value to send with
+ * `kongcheck explain-request` to confirm that Kong routes each request to the
+ * intended service, so the operator can verify the pattern is intentional.
+ */
+function buildHeaderStratifiedFinding(
+	winner: MarshalledRoute,
+	loser: MarshalledRoute,
+	samplePath: string,
+	flavor: RouterFlavor,
+): Finding {
+	const winName = winner.route.name ?? winner.route.id;
+	const loseName = loser.route.name ?? loser.route.id;
+	const winHeaders = winner.route.headers ?? {};
+
+	const headerDesc = Object.entries(winHeaders)
+		.map(([k, vs]) => `${k}: [${vs.join(', ')}]`)
+		.join('; ');
+
+	// Build --header flags using the first value of each required header so
+	// the operator can copy-paste a ready-to-run command.
+	const headerFlags = Object.entries(winHeaders)
+		.map(([k, vs]) => `--header ${k}:${vs[0]!}`)
+		.join(' ');
+
+	const paths = (winner.route.paths ?? []).join(', ') || samplePath;
+
+	return {
+		severity: 'INFO',
+		type: 'collision',
+		routerFlavor: flavor,
+		routes: [winner.route, loser.route],
+		samples: [samplePath],
+		winnerId: winner.route.id,
+		reason: [
+			`Routes "${winName}" and "${loseName}" share identical path(s) and are correctly stratified by header.`,
+			`Path(s): ${paths}`,
+			`"${winName}" requires: ${headerDesc}`,
+			`"${loseName}" has no matching constraint — it handles all requests that lack the required header.`,
+			'Kong routes to the header-constrained route when the header is present; all other requests reach the unconstrained route.',
+			'No misrouting occurs. Confirm this header stratification is intentional.',
+		],
+		suggestions: [
+			`kongcheck explain-request GET ${samplePath} ${headerFlags}  →  should route to "${winName}"`,
+			`kongcheck explain-request GET ${samplePath}  →  should route to "${loseName}" (no header required)`,
+		],
+	};
+}
+
+/**
+ * Builds a MEDIUM-level finding for a route pair where header constraints use
+ * `~*`-prefixed regex values, making static stratification analysis impossible.
+ *
+ * Kong can match these headers correctly at runtime, but we cannot determine
+ * at static-analysis time whether the patterns are disjoint (that would require
+ * PCRE intersection testing). We conservatively emit MEDIUM with an explanatory
+ * note so the operator knows to verify the routing manually.
+ */
+function buildRegexHeaderOpaqueFinding(
+	winner: MarshalledRoute,
+	loser: MarshalledRoute,
+	samplePath: string,
+	flavor: RouterFlavor,
+): Finding {
+	const winName = winner.route.name ?? winner.route.id;
+	const loseName = loser.route.name ?? loser.route.id;
+
+	// Collect all ~* values from both routes for display.
+	const regexValues: string[] = [];
+	for (const values of Object.values(winner.route.headers ?? {})) {
+		regexValues.push(...values.filter((v) => v.startsWith('~*')));
+	}
+	for (const values of Object.values(loser.route.headers ?? {})) {
+		regexValues.push(...values.filter((v) => v.startsWith('~*')));
+	}
+
+	const winSvc = winner.service?.id ?? winner.route.service?.id;
+	const loseSvc = loser.service?.id ?? loser.route.service?.id;
+	const crossService = winSvc && loseSvc && winSvc !== loseSvc;
+
+	return {
+		severity: 'MEDIUM',
+		type: 'collision',
+		routerFlavor: flavor,
+		routes: [winner.route, loser.route],
+		samples: [samplePath],
+		winnerId: winner.route.id,
+		reason: [
+			`Routes "${winName}" and "${loseName}" share identical path(s) and both use ` +
+				'`~*`-prefixed regex header values.',
+			`Regex header values detected: ${regexValues.join(', ')}`,
+			'Static analysis cannot determine whether these regex patterns are disjoint — ' +
+				'PCRE intersection testing is required to be certain.',
+			crossService
+				? `⚠  Routes target DIFFERENT services. If the regex patterns overlap, ` +
+					`requests could be misrouted between "${winName}" (${winSvc}) and "${loseName}" (${loseSvc}).`
+				: 'Both routes target the same service; misrouting risk is lower but the overlap should be verified.',
+			'Use `kongcheck explain-request` with representative header values to confirm correct routing.',
+		],
+		suggestions: [
+			`Verify manually that the ~* header patterns are truly disjoint for all real traffic values.`,
+			`kongcheck explain-request GET ${samplePath}  →  observe which route wins for each header value`,
+		],
+	};
+}
+
+/**
+ * Classifies the severity of a collision finding.
+ *
+ * - `HIGH`:   Different services; misrouting traffic to the wrong backend.
+ * - `MEDIUM`: Same service, ambiguous overlap (no clear intentional pattern).
+ * - `LOW`:    Intentional routing pattern within the same service — no misrouting
+ *             occurs in practice. Two sub-cases:
+ *             1. Explicit `regex_priority` override: the operator deliberately
+ *                set a higher value on the winner.
+ *             2. More-specific route correctly overrides a same-service catch-all
+ *                (winner's `maxUriLength` > loser's).
+ *
+ * Note: identical-path, header-stratified pairs (different services) are
+ * intercepted by the caller before reaching this function and emitted as INFO.
+ */
+function classifyCollisionSeverity(winner: MarshalledRoute, loser: MarshalledRoute): Severity {
+	const winSvc = winner.service?.id ?? winner.route.service?.id;
+	const loseSvc = loser.service?.id ?? loser.route.service?.id;
+
+	if (winSvc && loseSvc && winSvc !== loseSvc) {
+		return 'HIGH';
+	}
+
+	// Same service below.
+
+	// LOW: explicit regex_priority override. The operator deliberately assigned a
+	// higher priority to the winner as an intentional routing refinement.
+	const winRp = winner.route.regex_priority ?? 0;
+	const loseRp = loser.route.regex_priority ?? 0;
+	if (winRp > loseRp) return 'LOW';
+
+	// LOW: more-specific route correctly overrides a same-service catch-all.
+	// The winner has a longer path pattern (max_uri_length tie-breaker), meaning
+	// it is a more-specific refinement route intentionally overriding the broader
+	// catch-all within the same service.
+	if (winner.maxUriLength > loser.maxUriLength) return 'LOW';
+
+	return 'MEDIUM';
+}
+
+/**
+ * Builds the human-readable reason chain for a collision finding.
+ */
+function buildCollisionReason(
+	winner: MarshalledRoute,
+	loser: MarshalledRoute,
+	samplePath: string,
+	flavor: RouterFlavor,
+): string[] {
+	const winName = winner.route.name ?? winner.route.id;
+	const loseName = loser.route.name ?? loser.route.id;
+	const lines: string[] = [];
+
+	// Describe what each route looks like.
+	for (const [label, mr] of [
+		['winner', winner],
+		['shadowed', loser],
+	] as const) {
+		const paths = mr.route.paths?.join(', ') ?? '(no paths)';
+		const rp = mr.route.regex_priority ?? 0;
+		const ca = mr.route.created_at ? new Date(mr.route.created_at * 1000).toISOString() : 'unknown';
+		lines.push(
+			`Route "${label === 'winner' ? winName : loseName}" (${label}): paths=[${paths}], ` +
+				`regex_priority=${rp}, created_at=${ca}`,
+		);
+	}
+
+	lines.push(`Both routes match sample request path "${samplePath}".`);
+
+	// Explain the path semantics of the winner if it has suspicious regex paths.
+	for (const p of winner.parsedPaths) {
+		if (p.kind === 'regex') {
+			const issues = detectSuspiciousRegexIssues(p.raw);
+			if (issues.length > 0) {
+				lines.push(
+					`Winner path "${p.raw}" is a regex path (compiled as: ${p.regexSource}) ` +
+						`under ${flavor} flavor – not a glob.`,
+				);
+				lines.push(...issues);
+			}
+		}
+	}
+
+	// Explain tie-breaking.
+	const result = simulateRequest([winner, loser], {
+		method: 'GET',
+		host: 'example.com',
+		path: samplePath,
+	});
+	lines.push(...result.explanation);
+
+	return lines;
+}
+
+/**
+ * Builds suggested safer replacement path patterns for the routes in a
+ * collision finding.
+ *
+ * When both routes share identical path strings the regex suggestion would be
+ * the same for both — emitting it twice is confusing. We deduplicate and
+ * append an explanatory note so the reader understands the root cause is a
+ * duplicate route, not just a regex issue.
+ */
+function buildCollisionSuggestions(winner: MarshalledRoute, loser: MarshalledRoute): string[] {
+	const raw: string[] = [];
+	for (const mr of [winner, loser]) {
+		for (const p of mr.parsedPaths) {
+			const fix = suggestRegexFix(p.raw);
+			if (fix) raw.push(fix);
+		}
+	}
+	// Deduplicate — identical paths produce identical fixes; showing the same
+	// suggestion twice misleads the reader into thinking there are two separate
+	// things to fix.
+	const unique = [...new Set(raw)];
+
+	// When both routes have exactly the same path(s), the path regex is not the
+	// root cause — the duplicate route itself is. Add an actionable note.
+	if (haveIdenticalPaths(winner, loser)) {
+		unique.push(
+			'These routes have identical paths — delete the shadowed route, ' +
+				'or differentiate using hosts / methods / headers constraints',
+		);
+	}
+
+	return unique;
+}
+
+/**
+ * Detects route pairs whose path prefixes share a common stem but where
+ * simulation (pass 2) may not have generated a covering request.
+ *
+ * Classic example: `/epp` and `/epp-poc` — a route matching the prefix `/epp`
+ * will also match requests to `/epp-poc/...`.
+ *
+ * Only emits findings for pairs not already covered by the collision pass.
+ */
+function detectSiblingOverlaps(
+	routes: MarshalledRoute[],
+	flavor: RouterFlavor,
+	existingFindings: Finding[],
+	includeInfo: boolean,
+): Finding[] {
+	const findings: Finding[] = [];
+	const coveredPairs = new Set<string>(
+		existingFindings.flatMap((f) =>
+			f.routes.length >= 2 ? [[f.routes[0]!.id, f.routes[1]!.id].sort().join('|')] : [],
+		),
+	);
+
+	for (let i = 0; i < routes.length; i++) {
+		for (let j = i + 1; j < routes.length; j++) {
+			const a = routes[i]!;
+			const b = routes[j]!;
+
+			// Skip pairs where either route is a universal matcher (catch-all).
+			// A catch-all overlaps with every route by definition; flagging all
+			// those pairs would produce O(n) noise with no actionable insight.
+			if (isUniversalMatcher(a) || isUniversalMatcher(b)) continue;
+
+			// Skip: same-route pair (multi-path route split into multiple MarshalledRoutes).
+			if (a.route.id === b.route.id) continue;
+
+			const pairKey = [a.route.id, b.route.id].sort().join('|');
+			if (coveredPairs.has(pairKey)) continue;
+
+			const overlap = findSiblingOverlapSample(a, b);
+			if (!overlap) continue;
+
+			coveredPairs.add(pairKey);
+
+			// Determine winner by sort order.
+			const [winner, loser] = compareRoutes(a, b) <= 0 ? [a, b] : [b, a];
+
+			// Skip: winner has {variable} template placeholders (PCRE literals, not wildcards).
+			if (winner.parsedPaths.some((p) => p.kind === 'regex' && /\{[^}]+\}/.test(p.regexSource ?? ''))) continue;
+
+			// INFO/MEDIUM: identical-path, header-stratified pair. Same logic as detectCollisions.
+			if (haveIdenticalPaths(winner, loser)) {
+				const stratification = isHeaderStratified(winner, loser);
+				if (stratification === 'stratified') {
+					if (includeInfo) findings.push(buildHeaderStratifiedFinding(winner, loser, overlap, flavor));
+					continue;
+				}
+				if (stratification === 'regex-opaque') {
+					findings.push(buildRegexHeaderOpaqueFinding(winner, loser, overlap, flavor));
+					coveredPairs.add(pairKey);
+					continue;
+				}
+			}
+
+			const severity = classifyCollisionSeverity(winner, loser);
+			const suggestions = buildCollisionSuggestions(winner, loser);
+
+			findings.push({
+				severity,
+				type: 'shadowing',
+				routerFlavor: flavor,
+				routes: [winner.route, loser.route],
+				samples: [overlap],
+				winnerId: winner.route.id,
+				reason: [
+					`Route "${winner.route.name ?? winner.route.id}" has a path that can match requests ` +
+						`intended for "${loser.route.name ?? loser.route.id}".`,
+					`Sample request "${overlap}" matches both routes.`,
+					`This is a sibling namespace overlap: the path prefixes/patterns share a common stem.`,
+				],
+				suggestions,
+			});
+		}
+	}
+
+	return findings;
+}
+
+/**
+ * For two routes, tries to find a path that would be matched by both.
+ *
+ * Specifically, checks whether any path pattern of route `a` can match a
+ * canonical sample path derived from route `b`'s path patterns, and vice
+ * versa.
+ *
+ * @returns A sample path string if an overlap is found, or `undefined`.
+ */
+function findSiblingOverlapSample(a: MarshalledRoute, b: MarshalledRoute): string | undefined {
+	// Try b's paths as candidates for a's patterns.
+	for (const bPath of b.parsedPaths) {
+		const sample =
+			bPath.prefix ??
+			bPath.regexSource
+				?.replace(/\{[^}]+\}/g, 'id')
+				?.replace(/\([^)]+\)/g, 'id')
+				?.replace(/[^/a-zA-Z0-9-]/g, '') ??
+			'';
+		if (!sample) continue;
+		for (const ap of a.parsedPaths) {
+			if (!matchPath(ap, sample)) continue;
+			// Determine where the match ends on the sample string.
+			const matchEnd = ap.kind === 'prefix' ? (ap.prefix?.length ?? 0) : (ap.regex?.exec(sample)?.[0].length ?? 0);
+			// Skip when the match is a clean path boundary:
+			// - nextChar is '/' → the match ends right before a new segment.
+			// - nextChar is undefined → the match consumed the full sample.
+			// - the last char consumed by the match is '/' → the prefix itself
+			//   ends with a trailing slash (e.g. /prefix/ vs /prefix/child).
+			const nextChar = sample[matchEnd];
+			const matchEndChar = matchEnd > 0 ? sample[matchEnd - 1] : undefined;
+			if (nextChar === undefined || nextChar === '/' || matchEndChar === '/') continue;
+			return sample;
+		}
+	}
+
+	// Try a's paths as candidates for b's patterns.
+	for (const aPath of a.parsedPaths) {
+		const sample =
+			aPath.prefix ??
+			aPath.regexSource
+				?.replace(/\{[^}]+\}/g, 'id')
+				?.replace(/\([^)]+\)/g, 'id')
+				?.replace(/[^/a-zA-Z0-9-]/g, '') ??
+			'';
+		if (!sample) continue;
+		for (const bp of b.parsedPaths) {
+			if (!matchPath(bp, sample)) continue;
+			const matchEnd = bp.kind === 'prefix' ? (bp.prefix?.length ?? 0) : (bp.regex?.exec(sample)?.[0].length ?? 0);
+			const nextChar = sample[matchEnd];
+			const matchEndChar = matchEnd > 0 ? sample[matchEnd - 1] : undefined;
+			if (nextChar === undefined || nextChar === '/' || matchEndChar === '/') continue;
+			return sample;
+		}
+	}
+
+	return undefined;
+}
