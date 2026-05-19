@@ -98,7 +98,7 @@ Kong's router uses deterministic priority rules to select a winning route for ea
 The analysis runs four passes –
 
 1. **Suspicious regex linting** – each regex path (`~`-prefixed) is checked for glob-style `*` usage, which has different semantics in PCRE.
-2. **Collision simulation** – candidate request paths are derived from your routes' own patterns and each is simulated to find routes that overlap.
+2. **Collision simulation** – candidate request paths are derived from your routes' own patterns and each is simulated to find routes that overlap. When multiple routes match, the winner is determined by Kong's full priority chain: host-type weight (`PLAIN_HOSTS_ONLY` / wildcard-with-port) → header count → `regex_priority` → path length → `created_at`.
 3. **Sibling namespace detection** – route pairs whose path prefixes share a common stem (e.g. `/epp` and `/epp-poc`) are flagged as potential shadows even when simulation didn't generate a specific colliding request.
 4. **Universal-matcher annotation** – catch-all routes (e.g. a SPA served from `/`) are identified and optionally surfaced as `INFO` findings.
 
@@ -184,7 +184,7 @@ kongcheck explain-request --path /api/v1/users --format json
 The output shows –
 
 - The **winning route** name and ID
-- A step-by-step **explanation** of why it won (regex_priority, path specificity, creation date tie-breaking)
+- A step-by-step **explanation** of why it won (host-type ordering, header count, `regex_priority`, path specificity, creation date tie-breaking)
 - All **other routes that also matched**, in priority order
 
 ---
@@ -411,7 +411,7 @@ kongcheck analyze --file snapshots/2026-05-07.json --format json > after.json
 | Severity | Meaning                                                                                                                                                                         |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HIGH`   | A route is an accidental universal catch-all (matches every request), or a proven shadowing scenario with a clear winner. Likely causing silent traffic misdirection right now. |
-| `MEDIUM` | A suspicious regex path or a collision that may or may not be intentional. Worth reviewing.                                                                                     |
+| `MEDIUM` | A suspicious regex path, a collision where both routes constrain the same header with `~*` regex values (the analyzer can't prove the patterns are disjoint), or a general collision that may or may not be intentional. Worth reviewing.                                                                                     |
 | `LOW`    | Sibling namespace overlap where the routes could shadow each other under some request patterns. Lower confidence.                                                               |
 | `INFO`   | Informational only. Universal catch-all routes that are intentional (e.g. a SPA fallback). Shown only with `--show-info`.                                                       |
 
@@ -422,7 +422,7 @@ kongcheck analyze --file snapshots/2026-05-07.json --format json > after.json
 | Type                | Description                                                                                                                                                                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `suspicious_regex`  | A regex path (`~`-prefixed) uses `*` as if it were a glob wildcard. In PCRE, `*` is a quantifier on the preceding token, not "anything". E.g. `~/epp/*` means "/epp" followed by zero or more `/`, not "anything under /epp/". Use `~/epp/.*` instead. |
-| `shadowing`         | Route A wins every request that route B can match, so route B can never be reached. Kong's priority rules (regex_priority → path length → created_at) determine the winner deterministically.                                                          |
+| `shadowing`         | Route A wins every request that route B can match, so route B can never be reached. Kong's priority rules (host-type weight → header count → `regex_priority` → path length → `created_at`) determine the winner deterministically.                                                          |
 | `collision`         | Two or more routes match the same request. The winner is determined by Kong's sort order, but the situation is fragile – a small change (e.g. adding a header constraint) could silently shift traffic.                                                |
 | `universal_matcher` | A route that matches every request URL. Common examples – a catch-all served from plain prefix `/`, or a default upstream. Shown only with `--show-info`.                                                                                              |
 
@@ -516,49 +516,6 @@ This lets a single running server query multiple control planes in one session (
 
 ---
 
-### `PLAIN_HOSTS_ONLY` and wildcard-host sort ordering
-
-Kong uses a three-bit `submatch_weight` field to rank routes. In addition to "has regex path", it records whether all hosts are plain (no wildcards) and whether a wildcard host includes an explicit port. Routes with only plain hosts outrank routes with wildcard hosts at the same path specificity.
-
-`kongcheck` only models the **regex-vs-plain path** bit. Host type does not affect the sort order in the tool.
-
-**Not caught by this tool**
-
-```
-# Route A – plain host, plain path
-route-a: host=api.example.com  path=/v1/users
-
-# Route B – wildcard host, plain path  (should lose to A in Kong)
-route-b: host=*.example.com    path=/v1/users
-```
-
-Kong will always send `GET api.example.com /v1/users` to `route-a`. `kongcheck` may report these as a `collision` without identifying `route-a` as the definitive winner.
-
----
-
-### Wildcard host port handling
-
-When a wildcard host includes an explicit port (`*.example.com:8080`), Kong builds a regex that pins the port. When the port is absent, Kong appends `(?::\d+)?` to also match requests that include a port in their `Host` header.
-
-`kongcheck` performs a plain string suffix check (`host.endsWith(".example.com")`) and does not handle ports in the request `Host` header.
-
-**Not caught by this tool**
-
-```
-# Route constrained to *.example.com (no port)
-# Kong matches both –
-#   Host: api.example.com
-#   Host: api.example.com:8443
-
-# kongcheck matches only:
-#   Host: api.example.com         ✓
-#   Host: api.example.com:8443    ✗  (suffix check fails)
-```
-
-If your Kong routes are behind a proxy that passes an explicit port in the `Host` header, `explain-request` may report no winner when Kong would successfully route the request.
-
----
-
 ### Header-constrained routes with identical paths
 
 When the winner has a header constraint and the loser does not, and both routes share **identical paths**, the static analyzer now classifies this as **INFO** rather than HIGH/MEDIUM/LOW. The finding includes ready-to-run `kongcheck explain-request` commands so you can confirm that Kong routes each request to the intended service:
@@ -581,21 +538,25 @@ When the winner has a header constraint and the loser does not, and both routes 
 
 ### Regex header values (`~*` prefix)
 
-A header constraint value can start with `~*` to indicate a PCRE regex match. `kongcheck` supports this in `explain-request` (via `--header`) and in exact matching. However, the **static analyzer** cannot determine at analysis time whether a `~*` pattern is disjoint from another route's literal values — it only compares plain string values when deciding whether to suppress a finding.
+A header constraint value can start with `~*` to indicate a PCRE regex match. `kongcheck` supports `~*` matching in `explain-request` (via `--header`) and in route simulation. However, the **static analyzer** cannot determine at analysis time whether two `~*` patterns on the same header are disjoint — it can only compare plain string values for overlap.
 
-**Not caught by this tool**
+When two routes share the same path and **both** constrain the same header with `~*` regex values, `kongcheck` cannot prove the patterns don't overlap and emits a **MEDIUM** finding.
+
+**Emits MEDIUM (cannot prove patterns are disjoint)**
 
 ```
 # Route A and Route B share the same path ~/users/([^/]+)
-# Route A: headers: { x-version: ["~*^v[0-9]+$"] }   ← only matches versioned clients
-# Route B: no header constraint
+# Route A: headers: { x-version: ["~*^v[0-9]+$"] }    ← matches versioned clients
+# Route B: headers: { x-version: ["~*^beta-.*"] }      ← matches beta clients
 
-# The analyzer cannot verify that the regex values are disjoint from Route B's
-# unconstrained header handling. It emits an INFO finding with explain-request
-# commands; use them to confirm which route wins for your specific header value.
+# The analyzer cannot verify that "^v[0-9]+$" and "^beta-.*" are disjoint.
+# It emits MEDIUM with explain-request commands. Use them to confirm which
+# route wins for your specific header values.
 ```
 
-Use `explain-request --header x-version:v3` to confirm which route wins.
+Use `explain-request --header x-version:v3` and `explain-request --header x-version:beta-1` to confirm routing.
+
+> **Note** — when the winner has a header constraint and the loser has **no** matching constraint on that header, the analyzer emits **INFO** (not MEDIUM). Only the case where both routes constrain the same header with `~*` regex values triggers MEDIUM.
 
 ---
 
@@ -806,7 +767,7 @@ Applied to `/marketing/userprofile/unauth/users/resend-user-activation-email` �
 
 The route `~/users/([^/]+)` was almost certainly intended to match only top-level `/users/<id>` requests. In `traditional_compatible` flavor a `^` anchor would be added automatically, giving `^/users/([^/]+)`, which would **not** match the long marketing path. In `traditional` flavor you must add the anchor explicitly – `~/^users/([^/]+)` or migrate to `traditional_compatible`.
 
-This type of finding is real — Kong genuinely routes `/marketing/userprofile/unauth/users/resend-user-activation-email` to the `~/users/([^/]+)` route when both are present and the regex route wins on `submatch_weight`. Whether it causes a problem in practice depends on whether these routes are constrained to different `Host` headers (which `kongcheck` does not evaluate statically — see [Unsupported features](#unsupported-features-and-known-gaps)).
+This type of finding is real — Kong genuinely routes `/marketing/userprofile/unauth/users/resend-user-activation-email` to the `~/users/([^/]+)` route when both are present and the regex route wins on `submatch_weight`. Whether it causes a problem in practice depends on whether these routes are constrained to **completely different** `Host` headers (mutually exclusive virtual hosts). `kongcheck` models host-type sort ordering (plain hosts outrank wildcard hosts at equal path specificity), but it does not statically analyse whether two routes' host sets are mutually exclusive — that requires manual review.
 
 </details>
 
