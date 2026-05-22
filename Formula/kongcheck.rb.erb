@@ -1,0 +1,44 @@
+<%# This file is the ERB template for Formula/kongcheck.rb.              -%>
+<%# Rendered by scripts/update-formula.rb (called from release.yml).    -%>
+<%# Do not edit Formula/kongcheck.rb directly — edit this file instead. -%>
+<%#                                                                       -%>
+<%# To install once the tap is configured:                               -%>
+<%#   brew tap paambaati/kongcheck https://github.com/paambaati/kongcheck -%>
+<%#   brew install kongcheck                                              -%>
+class Kongcheck < Formula
+  desc "CLI tool for detecting Kong Konnect route collisions and shadowing"
+  homepage "https://github.com/paambaati/kongcheck"
+  license "MIT"
+  version "<%= version %>"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/paambaati/kongcheck/releases/download/v<%= version %>/kongcheck-darwin-arm64"
+      sha256 "<%= sha_darwin_arm64 %>"
+    end
+    on_intel do
+      url "https://github.com/paambaati/kongcheck/releases/download/v<%= version %>/kongcheck-darwin-x64"
+      sha256 "<%= sha_darwin_x64 %>"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/paambaati/kongcheck/releases/download/v<%= version %>/kongcheck-linux-arm64"
+      sha256 "<%= sha_linux_arm64 %>"
+    end
+    on_intel do
+      url "https://github.com/paambaati/kongcheck/releases/download/v<%= version %>/kongcheck-linux-x64"
+      sha256 "<%= sha_linux_x64 %>"
+    end
+  end
+
+  def install
+    binary = Dir["kongcheck-*"].first
+    bin.install binary => "kongcheck"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/kongcheck --version")
+  end
+end

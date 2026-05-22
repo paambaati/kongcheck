@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-slim
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      # Output keys for a package at path "." in a packages-style config are
+      # prefixed with the path, i.e. ".--release_created" and ".--tag_name".
+      release_created: ${{ steps.release.outputs['.--release_created'] }}
+      tag_name: ${{ steps.release.outputs['.--tag_name'] }}
+
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-and-publish:
+    name: Build & publish
+    needs: [release-please, ci]
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-slim
+    permissions:
+      contents: write # upload release assets + push formula update
+
+    steps:
+      # Check out main so we can push the Homebrew formula update back.
+      # release-please tags the HEAD of main when the Release PR is merged,
+      # so this is the same commit that was tagged.
+      - uses: actions/checkout@v6
+        name: Checkout code
+        with:
+          ref: main
+
+      - uses: oven-sh/setup-bun@v2
+        name: Setup Bun
+        with:
+          bun-version: latest
+
+      - uses: ruby/setup-ruby@v1
+        name: Setup Ruby
+        with:
+          ruby-version: ruby # latest stable; ERB is in stdlib, no gems needed
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Bun cross-compiles all targets from a single Linux runner.
+      - name: Build platform binaries
+        run: |
+          mkdir -p dist
+
+          bun build --compile --target bun-darwin-arm64 \
+            --outfile dist/kongcheck-darwin-arm64 src/cli.ts
+
+          bun build --compile --target bun-darwin-x64 \
+            --outfile dist/kongcheck-darwin-x64 src/cli.ts
+
+          bun build --compile --target bun-linux-x64 \
+            --outfile dist/kongcheck-linux-x64 src/cli.ts
+
+          bun build --compile --target bun-linux-arm64 \
+            --outfile dist/kongcheck-linux-arm64 src/cli.ts
+
+          bun build --compile --target bun-windows-x64 \
+            --outfile dist/kongcheck-windows-x64.exe src/cli.ts
+
+      # Upload binaries to the GitHub Release that release-please created.
+      - name: Upload binaries to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: |
+            dist/kongcheck-darwin-arm64
+            dist/kongcheck-darwin-x64
+            dist/kongcheck-linux-x64
+            dist/kongcheck-linux-arm64
+            dist/kongcheck-windows-x64.exe
+
+      # Compute SHA256 of each binary so the Homebrew formula can verify downloads.
+      - name: Compute SHA256 checksums
+        id: sha256
+        run: |
+          echo "darwin_arm64=$(sha256sum dist/kongcheck-darwin-arm64   | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "darwin_x64=$(sha256sum   dist/kongcheck-darwin-x64     | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_x64=$(sha256sum    dist/kongcheck-linux-x64      | awk '{print $1}')" >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(sha256sum  dist/kongcheck-linux-arm64    | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      # Render Formula/kongcheck.rb from Formula/kongcheck.rb.erb using ERB.
+      # Push the result back to main with [skip ci] so this workflow does not
+      # trigger a second run.
+      - name: Update Homebrew formula
+        run: ruby scripts/update-formula.rb
+        env:
+          SHA_DARWIN_ARM64: ${{ steps.sha256.outputs.darwin_arm64 }}
+          SHA_DARWIN_X64: ${{ steps.sha256.outputs.darwin_x64 }}
+          SHA_LINUX_X64: ${{ steps.sha256.outputs.linux_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.sha256.outputs.linux_arm64 }}
+
+      - name: Commit and push Homebrew formula update
+        run: |
+          VERSION=$(jq -r '.version' package.json)
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/kongcheck.rb
+          git commit -m "chore: update Homebrew formula to v${VERSION} [skip ci]"
+          git push

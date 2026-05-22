@@ -33,7 +33,6 @@ Results are explained in plain language, with sample requests that reproduce eac
 - [Severity levels](#severity-levels)
 - [Finding types](#finding-types)
 - [Router flavors](#router-flavors)
-- [Building a standalone binary](#building-a-standalone-binary)
 - [MCP server](#mcp-server)
 - [Unsupported features and known gaps](#unsupported-features-and-known-gaps)
 - [FAQs](#faqs)
@@ -42,25 +41,55 @@ Results are explained in plain language, with sample requests that reproduce eac
 
 ## Installation
 
-**Prerequisites** – [Bun](https://bun.sh) v1.3 or later.
+### Homebrew (macOS and Linux)
 
 ```bash
-git clone <repo-url> kongcheck
-cd kongcheck
-bun install
+brew tap paambaati/kongcheck https://github.com/paambaati/kongcheck
+brew install kongcheck
 ```
 
-To run directly without building –
+### Direct binary download
+
+Pre-built binaries for every platform are attached to each [GitHub Release](https://github.com/paambaati/kongcheck/releases).
+
+```bash
+# macOS — Apple Silicon
+curl -fsSL https://github.com/paambaati/kongcheck/releases/latest/download/kongcheck-darwin-arm64 \
+  -o /usr/local/bin/kongcheck && chmod +x /usr/local/bin/kongcheck
+
+# macOS — Intel
+curl -fsSL https://github.com/paambaati/kongcheck/releases/latest/download/kongcheck-darwin-x64 \
+  -o /usr/local/bin/kongcheck && chmod +x /usr/local/bin/kongcheck
+
+# Linux — x86_64
+curl -fsSL https://github.com/paambaati/kongcheck/releases/latest/download/kongcheck-linux-x64 \
+  -o /usr/local/bin/kongcheck && chmod +x /usr/local/bin/kongcheck
+
+# Linux — ARM64
+curl -fsSL https://github.com/paambaati/kongcheck/releases/latest/download/kongcheck-linux-arm64 \
+  -o /usr/local/bin/kongcheck && chmod +x /usr/local/bin/kongcheck
+
+# Windows — x64 (PowerShell)
+Invoke-WebRequest https://github.com/paambaati/kongcheck/releases/latest/download/kongcheck-windows-x64.exe `
+  -OutFile kongcheck.exe
+```
+
+### Build from source
+
+Requires [Bun](https://bun.sh) v1.3 or later.
+
+```bash
+git clone https://github.com/paambaati/kongcheck.git
+cd kongcheck
+bun install
+bun run build
+# produces ./dist/kongcheck
+```
+
+To run without building first –
 
 ```bash
 bun run start <command> [options]
-```
-
-To build a self-contained binary –
-
-```bash
-bun run build
-# produces ./kongcheck
 ```
 
 ---
@@ -408,12 +437,12 @@ kongcheck analyze --file snapshots/2026-05-07.json --format json > after.json
 
 ## Severity levels
 
-| Severity | Meaning                                                                                                                                                                         |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HIGH`   | A route is an accidental universal catch-all (matches every request), or a proven shadowing scenario with a clear winner. Likely causing silent traffic misdirection right now. |
-| `MEDIUM` | A suspicious regex path, a collision where both routes constrain the same header with `~*` regex values (the analyzer can't prove the patterns are disjoint), or a general collision that may or may not be intentional. Worth reviewing.                                                                                     |
-| `LOW`    | Sibling namespace overlap where the routes could shadow each other under some request patterns. Lower confidence.                                                               |
-| `INFO`   | Informational only. Universal catch-all routes that are intentional (e.g. a SPA fallback). Shown only with `--show-info`.                                                       |
+| Severity | Meaning                                                                                                                                                                                                                                   |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HIGH`   | A route is an accidental universal catch-all (matches every request), or a proven shadowing scenario with a clear winner. Likely causing silent traffic misdirection right now.                                                           |
+| `MEDIUM` | A suspicious regex path, a collision where both routes constrain the same header with `~*` regex values (the analyzer can't prove the patterns are disjoint), or a general collision that may or may not be intentional. Worth reviewing. |
+| `LOW`    | Sibling namespace overlap where the routes could shadow each other under some request patterns. Lower confidence.                                                                                                                         |
+| `INFO`   | Informational only. Universal catch-all routes that are intentional (e.g. a SPA fallback). Shown only with `--show-info`.                                                                                                                 |
 
 ---
 
@@ -422,7 +451,7 @@ kongcheck analyze --file snapshots/2026-05-07.json --format json > after.json
 | Type                | Description                                                                                                                                                                                                                                            |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `suspicious_regex`  | A regex path (`~`-prefixed) uses `*` as if it were a glob wildcard. In PCRE, `*` is a quantifier on the preceding token, not "anything". E.g. `~/epp/*` means "/epp" followed by zero or more `/`, not "anything under /epp/". Use `~/epp/.*` instead. |
-| `shadowing`         | Route A wins every request that route B can match, so route B can never be reached. Kong's priority rules (host-type weight → header count → `regex_priority` → path length → `created_at`) determine the winner deterministically.                                                          |
+| `shadowing`         | Route A wins every request that route B can match, so route B can never be reached. Kong's priority rules (host-type weight → header count → `regex_priority` → path length → `created_at`) determine the winner deterministically.                    |
 | `collision`         | Two or more routes match the same request. The winner is determined by Kong's sort order, but the situation is fragile – a small change (e.g. adding a header constraint) could silently shift traffic.                                                |
 | `universal_matcher` | A route that matches every request URL. Common examples – a catch-all served from plain prefix `/`, or a default upstream. Shown only with `--show-info`.                                                                                              |
 
@@ -470,6 +499,29 @@ This lets a single running server query multiple control planes in one session (
 | `get_route_config` | `kongcheck dump-config`     | Raw routes and services JSON for the agent to inspect                     |
 
 ### Configuration
+
+**OpenCode** – `~/.config/opencode/opencode.json` –
+
+```json
+{
+	"$schema": "https://opencode.ai/config.json",
+	"mcp": {
+		"kongcheck": {
+			"type": "local",
+			"command": ["/path/to/kongcheck", "mcp"],
+			"enabled": true,
+			"environment": {
+				"KONNECT_TOKEN": "kpat_...",
+				"KONNECT_CONTROL_PLANE_ID": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+				"KONNECT_REGION": "us"
+			}
+		}
+	},
+	"tools": {
+		"kongcheck": true
+	}
+}
+```
 
 **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` –
 

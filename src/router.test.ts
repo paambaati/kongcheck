@@ -1186,10 +1186,7 @@ describe('marshalRoute – subMatchWeight edge cases: mixed and multi-wildcard h
 			paths: ['/api'],
 			hosts: ['api.example.com', 'api.staging.example.com', 'api.dev.example.com'],
 		});
-		expect(
-			mr.subMatchWeight & 0x02,
-			'All three hosts are plain (no wildcards) → PLAIN_HOSTS_ONLY must be set',
-		).toBe(2);
+		expect(mr.subMatchWeight & 0x02, 'All three hosts are plain (no wildcards) → PLAIN_HOSTS_ONLY must be set').toBe(2);
 	});
 
 	it('HAS_WILDCARD_HOST_PORT (bit 2) is set when the SECOND wildcard host has a port (first has none)', () => {
@@ -1261,14 +1258,10 @@ describe('compareRoutes – all subMatchWeight combinations (Gap #1 deep coverag
 			hosts: ['*.example.com:8080'],
 		});
 
-		expect(
-			regexPlainHost.subMatchWeight,
-			'Regex path (bit 0) + plain host (bit 1) → 0x01 | 0x02 = 0x03 = 3',
-		).toBe(3);
-		expect(
-			noRegexWildcardPort.subMatchWeight,
-			'No regex path, wildcard host with port (bit 2 only) → 0x04 = 4',
-		).toBe(4);
+		expect(regexPlainHost.subMatchWeight, 'Regex path (bit 0) + plain host (bit 1) → 0x01 | 0x02 = 0x03 = 3').toBe(3);
+		expect(noRegexWildcardPort.subMatchWeight, 'No regex path, wildcard host with port (bit 2 only) → 0x04 = 4').toBe(
+			4,
+		);
 		expect(
 			compareRoutes(noRegexWildcardPort, regexPlainHost),
 			'subMatchWeight 4 (wildcard-with-port) > 3 (regex-plain-host) — wildcard-with-port wins by integer comparison',
@@ -1291,14 +1284,8 @@ describe('compareRoutes – all subMatchWeight combinations (Gap #1 deep coverag
 			hosts: ['*.internal.example.com'],
 		});
 
-		expect(
-			plainHost.subMatchWeight,
-			'Plain host, no regex → only PLAIN_HOSTS_ONLY (bit 1) = 0x02 = 2',
-		).toBe(2);
-		expect(
-			wildcardHost.subMatchWeight,
-			'Wildcard host (no port), no regex → no bits set → subMatchWeight = 0',
-		).toBe(0);
+		expect(plainHost.subMatchWeight, 'Plain host, no regex → only PLAIN_HOSTS_ONLY (bit 1) = 0x02 = 2').toBe(2);
+		expect(wildcardHost.subMatchWeight, 'Wildcard host (no port), no regex → no bits set → subMatchWeight = 0').toBe(0);
 		expect(
 			compareRoutes(plainHost, wildcardHost),
 			'Plain-host route (subMatchWeight=2) must beat wildcard-host route (subMatchWeight=0)',
@@ -1325,10 +1312,7 @@ describe('compareRoutes – all subMatchWeight combinations (Gap #1 deep coverag
 			withHeader.subMatchWeight,
 			'Plain host with header constraint → subMatchWeight = 0x02 (same as next route)',
 		).toBe(2);
-		expect(
-			noHeader.subMatchWeight,
-			'Plain host with no header constraint → subMatchWeight = 0x02',
-		).toBe(2);
+		expect(noHeader.subMatchWeight, 'Plain host with no header constraint → subMatchWeight = 0x02').toBe(2);
 		expect(
 			compareRoutes(withHeader, noHeader),
 			'Tie on subMatchWeight: route with header constraint wins via header-count tier (tier 2)',
