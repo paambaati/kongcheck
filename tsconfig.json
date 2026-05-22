@@ -4,7 +4,7 @@
 		"target": "ESNext",
 		"module": "Preserve",
 		"moduleDetection": "force",
-		"allowJs": true,
+		"allowJs": false,
 		"types": ["bun"],
 		"moduleResolution": "bundler",
 		"allowImportingTsExtensions": true,
