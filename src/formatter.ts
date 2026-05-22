@@ -97,17 +97,17 @@ function severityColor(severity: Finding['severity']): (s: string) => string {
  * ──────────────────────────────────────────
  * [HIGH] potential_shadowing  (traditional)
  *
- *   Route: epp  (id: 111)  paths: ~/epp/*  regex_priority: 0
- *   Route: epp-poc  (id: 222)  paths: ~/epp-poc/*  regex_priority: 0
+ *   Route: payments  (id: 111)  paths: ~/payments/*  regex_priority: 0
+ *   Route: payments-v2  (id: 222)  paths: ~/payments-v2/*  regex_priority: 0
  *
- *   Sample requests: /epp-poc, /epp-poc/docs
- *   Winning route:   epp (id: 111)
+ *   Sample requests: /payments-v2, /payments-v2/docs
+ *   Winning route:   payments (id: 111)
  *
  *   Why:
  *     - Both routes match ...
  *
  *   Suggestions:
- *     - ~/epp(?:/.*)?$
+ *     - ~/payments(?:/.*)?$
  * ```
  *
  * @param findings     - Findings to format, typically already sorted by severity.

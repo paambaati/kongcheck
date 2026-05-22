@@ -46,7 +46,7 @@ import type {
  * @param raw - The raw path string from a route's `paths` array.
  *
  * @example
- * isRegexPath("~/epp/*")   // true
+ * isRegexPath("~/payments/*")   // true
  * isRegexPath("/api/v1")   // false
  */
 export function isRegexPath(raw: string): boolean {
@@ -60,8 +60,8 @@ export function isRegexPath(raw: string): boolean {
  * Kong source: `traditional.lua` – `path = sub(path, 2)`
  * ([~L437](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L437)).
  *
- * @param raw - A raw regex path, e.g. `"~/epp/*"`.
- * @returns The PCRE pattern without the leading `~`, e.g. `"/epp/*"`.
+ * @param raw - A raw regex path, e.g. `"~/payments/*"`.
+ * @returns The PCRE pattern without the leading `~`, e.g. `"/payments/*"`.
  *
  * @throws {Error} If called on a non-regex path (missing `~` prefix).
  */
@@ -95,12 +95,12 @@ export function stripRegexPrefix(raw: string): string {
  *
  * @example
  * // traditional flavor – no start anchor
- * // classifyPath("~/epp/*", "traditional")
- * //   kind: "regex", regexSource: "/epp/*", regex.source: "/epp/*"
+ * // classifyPath("~/payments/*", "traditional")
+ * //   kind: "regex", regexSource: "/payments/*", regex.source: "/payments/*"
  *
  * // traditional_compatible – start anchor added
- * // classifyPath("~/epp/*", "traditional_compatible")
- * //   kind: "regex", regexSource: "/epp/*", regex.source: "^/epp/*"
+ * // classifyPath("~/payments/*", "traditional_compatible")
+ * //   kind: "regex", regexSource: "/payments/*", regex.source: "^/payments/*"
  *
  * // classifyPath("/api/v1", "traditional")
  * //   kind: "prefix", prefix: "/api/v1"
@@ -299,7 +299,7 @@ export function compareRoutes(a: MarshalledRoute, b: MarshalledRoute): number {
  * - plain: [`traditional.lua` – MATCH_RULES.URI handler (~L1070-L1100)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1070-L1100)
  *
  * @param parsed  - The pre-classified path descriptor.
- * @param reqPath - The incoming request URI path, e.g. `"/epp-poc/docs"`.
+ * @param reqPath - The incoming request URI path, e.g. `"/payments-v2/docs"`.
  */
 export function matchPath(parsed: ParsedPath, reqPath: string): boolean {
 	if (parsed.kind === 'regex') {
@@ -503,7 +503,7 @@ export function matchRoute(mr: MarshalledRoute, request: SimRequest): boolean {
  *
  * @example
  * const sorted = routes.sort(compareRoutes);
- * const result = simulateRequest(sorted, { method: "GET", host: "example.com", path: "/epp-poc/docs" });
+ * const result = simulateRequest(sorted, { method: "GET", host: "example.com", path: "/payments-v2/docs" });
  * console.log(result.winner?.route.name, result.explanation);
  */
 export function simulateRequest(sortedRoutes: MarshalledRoute[], request: SimRequest): SimResult {

@@ -128,7 +128,7 @@ The analysis runs four passes –
 
 1. **Suspicious regex linting** – each regex path (`~`-prefixed) is checked for glob-style `*` usage, which has different semantics in PCRE.
 2. **Collision simulation** – candidate request paths are derived from your routes' own patterns and each is simulated to find routes that overlap. When multiple routes match, the winner is determined by Kong's full priority chain: host-type weight (`PLAIN_HOSTS_ONLY` / wildcard-with-port) → header count → `regex_priority` → path length → `created_at`.
-3. **Sibling namespace detection** – route pairs whose path prefixes share a common stem (e.g. `/epp` and `/epp-poc`) are flagged as potential shadows even when simulation didn't generate a specific colliding request.
+3. **Sibling namespace detection** – route pairs whose path prefixes share a common stem (e.g. `/payments` and `/payments-v2`) are flagged as potential shadows even when simulation didn't generate a specific colliding request.
 4. **Universal-matcher annotation** – catch-all routes (e.g. a SPA served from `/`) are identified and optionally surfaced as `INFO` findings.
 
 > **Note on router flavor** – `kongcheck` auto-detects your control plane's router flavor (`traditional`, `traditional_compatible`, or `expressions`) from the Konnect API. You can override it with `--flavor` if needed. The analysis is meaningless for `expressions` flavor, which uses a completely different routing syntax.
@@ -357,14 +357,14 @@ Kong Route Audit – 3 finding(s)  router_flavor: traditional
 [HIGH]  suspicious_regex  (traditional)
 
   winner    my-route  id: abc-123
-            paths: ~/epp/*  regex_priority: 0  created: 2024-01-15T10:00:00.000Z (16 months ago)
+            paths: ~/payments/*  regex_priority: 0  created: 2024-01-15T10:00:00.000Z (16 months ago)
 
   Why:
-    – Path "~/epp/*" uses regex syntax in a way that is likely unintentional:
+    – Path "~/payments/*" uses regex syntax in a way that is likely unintentional:
     – `*` after `/` is a PCRE quantifier meaning "zero or more slashes", not a glob wildcard.
 
   Suggested fixes:
-    → ~/epp/.*
+    → ~/payments/.*
 ```
 
 ### JSON (`--format json`)
@@ -382,10 +382,10 @@ A structured JSON object suitable for piping, CI ingestion, or custom dashboards
       "severity": "HIGH",
       "type": "suspicious_regex",
       "routerFlavor": "traditional",
-      "routes": [ { "id": "abc-123", "name": "my-route", "paths": ["~/epp/*"], ... } ],
+      "routes": [ { "id": "abc-123", "name": "my-route", "paths": ["~/payments/*"], ... } ],
       "samples": [],
-      "reason": [ "Path \"~/epp/*\" uses regex syntax ..." ],
-      "suggestions": ["~/epp/.*"]
+      "reason": [ "Path \"~/payments/*\" uses regex syntax ..." ],
+      "suggestions": ["~/payments/.*"]
     }
   ]
 }
@@ -448,12 +448,12 @@ kongcheck analyze --file snapshots/2026-05-07.json --format json > after.json
 
 ## Finding types
 
-| Type                | Description                                                                                                                                                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `suspicious_regex`  | A regex path (`~`-prefixed) uses `*` as if it were a glob wildcard. In PCRE, `*` is a quantifier on the preceding token, not "anything". E.g. `~/epp/*` means "/epp" followed by zero or more `/`, not "anything under /epp/". Use `~/epp/.*` instead. |
-| `shadowing`         | Route A wins every request that route B can match, so route B can never be reached. Kong's priority rules (host-type weight → header count → `regex_priority` → path length → `created_at`) determine the winner deterministically.                    |
-| `collision`         | Two or more routes match the same request. The winner is determined by Kong's sort order, but the situation is fragile – a small change (e.g. adding a header constraint) could silently shift traffic.                                                |
-| `universal_matcher` | A route that matches every request URL. Common examples – a catch-all served from plain prefix `/`, or a default upstream. Shown only with `--show-info`.                                                                                              |
+| Type                | Description                                                                                                                                                                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `suspicious_regex`  | A regex path (`~`-prefixed) uses `*` as if it were a glob wildcard. In PCRE, `*` is a quantifier on the preceding token, not "anything". E.g. `~/payments/*` means "/payments" followed by zero or more `/`, not "anything under /payments/". Use `~/payments/.*` instead. |
+| `shadowing`         | Route A wins every request that route B can match, so route B can never be reached. Kong's priority rules (host-type weight → header count → `regex_priority` → path length → `created_at`) determine the winner deterministically.                                        |
+| `collision`         | Two or more routes match the same request. The winner is determined by Kong's sort order, but the situation is fragile – a small change (e.g. adding a header constraint) could silently shift traffic.                                                                    |
+| `universal_matcher` | A route that matches every request URL. Common examples – a catch-all served from plain prefix `/`, or a default upstream. Shown only with `--show-info`.                                                                                                                  |
 
 ---
 
@@ -573,17 +573,17 @@ This lets a single running server query multiple control planes in one session (
 When the winner has a header constraint and the loser does not, and both routes share **identical paths**, the static analyzer now classifies this as **INFO** rather than HIGH/MEDIUM/LOW. The finding includes ready-to-run `kongcheck explain-request` commands so you can confirm that Kong routes each request to the intended service:
 
 ```
-[INFO] Routes "platform-auth-dev-userinfo" and "platform-auth-internal-userinfo"
+[INFO] Routes "auth-dev-users" and "auth-prod-users"
        share identical path(s) and are correctly stratified by header.
 
        Path(s): /userinfo
-       "platform-auth-dev-userinfo" requires: x-smp-env: [dev, develop, development]
-       "platform-auth-internal-userinfo" has no matching constraint
+       "auth-dev-users" requires: x-env: [dev, develop, development]
+       "auth-prod-users" has no matching constraint
 
-→ kongcheck explain-request GET /userinfo --header x-smp-env:dev
-    → should route to "platform-auth-dev-userinfo"
+→ kongcheck explain-request GET /userinfo --header x-env:dev
+    → should route to "auth-dev-users"
 → kongcheck explain-request GET /userinfo
-    → should route to "platform-auth-internal-userinfo" (no header required)
+    → should route to "auth-prod-users" (no header required)
 ```
 
 ---
@@ -619,10 +619,10 @@ When the winner has a **broader regex path** than the loser (non-identical paths
 **Example — still flagged as HIGH**
 
 ```
-# Route A: path=~/users/([^/]+)  headers={x-smp-env:[dev,...]}  → auth-dev service
+# Route A: path=~/users/([^/]+)  headers={x-env:[dev,...]}  → auth-dev service
 # Route B: path=/marketing/userprofile/users/resend-activation-email  (no headers)
 
-# In a dev environment where every request carries x-smp-env:dev, Route A
+# In a dev environment where every request carries x-env:dev, Route A
 # intercepts all traffic to Route B's path. The header does not fix the
 # path over-match. This is a real misrouting risk.
 ```
@@ -693,44 +693,44 @@ Not necessarily. The sample request demonstrates that both routes _match_, not t
 For example, given –
 
 ```
-winner  ~/persona-index-survey-be-service/*
-loser   ~/persona-index-survey-be/*
+winner  ~/catalog-service/*
+loser   ~/catalog-api/*
 ```
 
-The sample `/persona-index-survey-be-service/` does go to the correct (longer) route — Kong's path-length tie-breaker picks it. But the finding is flagging a structural fragility –
+The sample `/catalog-service/` does go to the correct (longer) route — Kong's path-length tie-breaker picks it. But the finding is flagging a structural fragility –
 
-1. **The shorter route over-matches.** `~/persona-index-survey-be/*` is unanchored PCRE, so it matches any URL containing `/persona-index-survey-be` as a substring, including `/persona-index-survey-be-service/`, `/persona-index-survey-be-v2/`, `/some/internal/persona-index-survey-be/resource`, etc.
+1. **The shorter route over-matches.** `~/catalog-api/*` is unanchored PCRE, so it matches any URL containing `/catalog-api` as a substring, including `/catalog-service/`, `/catalog-api-v2/`, `/some/internal/catalog-api/resource`, etc.
 2. **The overlap is latent, not active.** Right now the longer route always wins on path length. But if the longer route is ever deleted, all its traffic silently falls to the shorter one without any error.
-3. **Any future sibling is stolen.** A new route `~/persona-index-survey-be-mobile/*` added later would immediately have its traffic poached by the unanchored shorter route.
+3. **Any future sibling is stolen.** A new route `~/catalog-api-mobile/*` added later would immediately have its traffic poached by the unanchored shorter route.
 
 **Here is a request where the shorter route wins right now**
 
 ```
-Request: GET /persona-index-survey-be/login
+Request: GET /catalog-api/login
 
-~/persona-index-survey-be-service/*   NO MATCH  ← path has no "-service" segment
-~/persona-index-survey-be/*            MATCH     ← wins; silently proxied to the wrong service
+~/catalog-service/*   NO MATCH  ← path has no "-service" segment
+~/catalog-api/*            MATCH     ← wins; silently proxied to the wrong service
 ```
 
-`/persona-index-survey-be/login` does not contain `-service`, so the longer route never matches. The shorter route is the only candidate and wins unconditionally. Any request that belongs to the `persona-index-survey-be` service but does not go through the `-service` namespace is already being misrouted today.
+`/catalog-api/login` does not contain `-service`, so the longer route never matches. The shorter route is the only candidate and wins unconditionally. Any request that belongs to the `catalog-api` service but does not go through the `-service` namespace is already being misrouted today.
 
-The fix — `~/persona-index-survey-be(?:/.*)?$` — adds an end anchor and a clean path-boundary check, so the route only matches URLs that actually start with `/persona-index-survey-be` at a `/` boundary.
+The fix — `~/catalog-api(?:/.*)?$` — adds an end anchor and a clean path-boundary check, so the route only matches URLs that actually start with `/catalog-api` at a `/` boundary.
 
 </details>
 
 <details>
-<summary><strong>Why does <code>~/persona-index-survey-be/*</code> match <code>/persona-index-survey-be-service/</code>? They look like different paths.</strong></summary>
+<summary><strong>Why does <code>~/catalog-api/*</code> match <code>/catalog-service/</code>? They look like different paths.</strong></summary>
 
 Because in `traditional` flavor Kong does **not** add a `^` start anchor to regex paths, and `*` is a PCRE quantifier, not a glob wildcard.
 
-Step by step, the regex `/persona-index-survey-be/*` applied to `/persona-index-survey-be-service/` –
+Step by step, the regex `/catalog-api/*` applied to `/catalog-service/` –
 
 ```
-/persona-index-survey-be/*
+/catalog-api/*
          ↑ no ^ anchor — the engine searches for this pattern anywhere in the URL
 
-URL: /persona-index-survey-be-service/
-     ^^^^^^^^^^^^^^^^^^^^^^^^            ← the engine finds /persona-index-survey-be at position 0
+URL: /catalog-service/
+     ^^^^^^^^^^^^^^^^^^^^^^^^            ← the engine finds /catalog-api at position 0
                              -service/   ← this suffix is left over
                          *              ← * means "zero or more of the preceding char ('/')"
                                         ← matches zero times here, consuming nothing
@@ -738,11 +738,11 @@ URL: /persona-index-survey-be-service/
 → MATCH
 ```
 
-Compare with the anchored fix `~/persona-index-survey-be(?:/.*)?$` –
+Compare with the anchored fix `~/catalog-api(?:/.*)?$` –
 
 ```
-URL: /persona-index-survey-be-service/
-     ^^^^^^^^^^^^^^^^^^^^^^^^            ← matches /persona-index-survey-be
+URL: /catalog-service/
+     ^^^^^^^^^^^^^^^^^^^^^^^^            ← matches /catalog-api
                              -service/   ← (?:/.*)? requires a '/' or nothing — but '-' is next
 → NO MATCH ✓
 ```
@@ -754,13 +754,13 @@ The same trap applies to any pair of routes where one path name is a prefix of a
 <details>
 <summary><strong>Two identical-path routes are flagged as shadowing each other. Is one of them permanently unreachable?</strong></summary>
 
-Yes — when two routes have identical path patterns (e.g. both `~/ds-proposals/*` or both `/userinfo`), Kong's sort order is fully deterministic: the route with the earlier `created_at` timestamp always wins. The later-created route is permanently unreachable for any request that matches that path.
+Yes — when two routes have identical path patterns (e.g. both `~/orders/*` or both `/userinfo`), Kong's sort order is fully deterministic: the route with the earlier `created_at` timestamp always wins. The later-created route is permanently unreachable for any request that matches that path.
 
 The tool reports the creation timestamps for both routes so you can identify which one is dead –
 
 ```
-winner    ds-proposals-api-route        created: 2024-07-03T10:08:00Z
-shadowed  ds-proposals-templates-route  created: 2024-07-03T10:08:03Z  ← dead
+winner    orders-api-route        created: 2024-07-03T10:08:00Z
+shadowed  orders-templates-route  created: 2024-07-03T10:08:03Z  ← dead
 ```
 
 Common causes –
@@ -784,9 +784,9 @@ Because `~/mcp/*` is an extremely broad unanchored regex. In `traditional` flavo
 So `~/mcp/*` matches every URL that contains the substring `/mcp` — including –
 
 ```
-/genai/v1/test-smp-mcp-template/mcp/    ← /mcp appears near the end
+/api/v1/mcp-template/mcp/    ← /mcp appears near the end
 /finance/project/mcp                     ← /mcp at the end
-/genai/v0/marketplace/mcp-servers        ← /mcp- mid-segment
+/api/v0/marketplace/mcp-servers        ← /mcp- mid-segment
 /.well-known/oauth-protected-resource    ← does NOT match (no /mcp)
 ```
 
@@ -797,7 +797,7 @@ The fix `~/mcp(?:/.*)?$` anchors the match to the start of the URL (via Kong's e
 ```
 /mcp                    ✓  matches
 /mcp/sse                ✓  matches
-/genai/v1/.../mcp/      ✗  does not match (not at start)
+/api/v1/.../mcp/      ✗  does not match (not at start)
 /finance/project/mcp    ✗  does not match
 ```
 

@@ -170,7 +170,9 @@ function outputAndMaybeExit(
 cli
 	.command('analyze', 'Run full audit of suspicious regexes, collisions, and shadowing')
 	.example('  kongcheck analyze --control-plane-id <id> --token $TOKEN')
-	.example('  kongcheck analyze --control-plane-id <id> --token $TOKEN --filter tag:team-a --filter service:epp-svc')
+	.example(
+		'  kongcheck analyze --control-plane-id <id> --token $TOKEN --filter tag:team-a --filter service:payments-svc',
+	)
 	.action(async (options: Record<string, unknown>) => {
 		const verbose = !!options['verbose'];
 		const spinner = makeSpinner(verbose);
@@ -191,7 +193,7 @@ cli
 cli
 	.command('collisions', 'Show only routes that overlap or shadow each other (no suspicious-regex findings)')
 	.example('  kongcheck collisions --control-plane-id <id> --token $TOKEN --format json')
-	.example('  kongcheck collisions --control-plane-id <id> --token $TOKEN --filter path:/epp')
+	.example('  kongcheck collisions --control-plane-id <id> --token $TOKEN --filter path:/payments')
 	.action(async (options: Record<string, unknown>) => {
 		const verbose = !!options['verbose'];
 		const spinner = makeSpinner(verbose);
@@ -216,11 +218,11 @@ cli
 	.option('--host <host>', 'Host header, e.g. api.example.com', {
 		default: 'example.com',
 	})
-	.option('--path <path>', 'Request path, e.g. /epp-poc/docs')
-	.option('--header <header>', 'Request header as key:value (repeat for multiple), e.g. --header x-smp-env:dev')
+	.option('--path <path>', 'Request path, e.g. /payments-v2/docs')
+	.option('--header <header>', 'Request header as key:value (repeat for multiple), e.g. --header x-env:dev')
 	.example(
 		'  kongcheck explain-request --control-plane-id <id> --token $TOKEN ' +
-			'--method GET --host example.com --path /epp-poc/docs',
+			'--method GET --host example.com --path /payments-v2/docs',
 	)
 	.action(async (options: Record<string, unknown>) => {
 		const reqPath = options['path'] as string | undefined;

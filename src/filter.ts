@@ -12,14 +12,14 @@
  *   must match at least one value for that key.
  *
  * @example
- * // Include findings that touch any route belonging to "epp-svc":
- * // --filter service:epp-svc
+ * // Include findings that touch any route belonging to "payments-svc":
+ * // --filter service:payments-svc
  *
  * // Include findings touching routes tagged "team-a" OR "team-b":
  * // --filter tag:team-a --filter tag:team-b
  *
- * // Include findings touching routes tagged "team-a" AND under /epp:
- * // --filter tag:team-a --filter path:/epp
+ * // Include findings touching routes tagged "team-a" AND under /payments:
+ * // --filter tag:team-a --filter path:/payments
  */
 
 import type { Finding, KongRoute, KongService } from './types.ts';
@@ -64,7 +64,7 @@ export function parseFilter(raw: string): FilterPredicate {
 	if (colonIdx === -1) {
 		throw new Error(
 			`Invalid --filter "${raw}": expected format key:value ` +
-				`(e.g. path:/api, name:epp, service:epp-svc, tag:team-a, id:<uuid>)`,
+				`(e.g. path:/api, name:payments, service:payments-svc, tag:team-a, id:<uuid>)`,
 		);
 	}
 	const key = raw.slice(0, colonIdx);
@@ -119,8 +119,8 @@ export function routeMatchesPredicate(
 		}
 
 		case 'name': {
-			// Case-insensitive substring match: --filter name:epp matches
-			// "epp-route", "epp-poc-route", "my-epp-service-route", etc.
+			// Case-insensitive substring match: --filter name:payments matches
+			// "payments-route", "payments-v2-route", "my-payments-service-route", etc.
 			const name = route.name ?? '';
 			return name.toLowerCase().includes(pred.value.toLowerCase());
 		}

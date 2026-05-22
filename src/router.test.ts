@@ -46,7 +46,7 @@ function makeRoute(overrides: Partial<KongRoute> & { paths: string[] }): Marshal
 
 describe('isRegexPath', () => {
 	it('returns true for paths beginning with ~ (Kong regex path marker)', () => {
-		expect(isRegexPath('~/epp/*'), '~/epp/* starts with ~ so Kong treats it as a PCRE regex path').toBe(true);
+		expect(isRegexPath('~/payments/*'), '~/payments/* starts with ~ so Kong treats it as a PCRE regex path').toBe(true);
 	});
 
 	it('returns false for plain prefix paths that have no ~ prefix', () => {
@@ -62,7 +62,10 @@ describe('isRegexPath', () => {
 
 describe('stripRegexPrefix', () => {
 	it('removes the leading ~ to produce the bare PCRE pattern string', () => {
-		expect(stripRegexPrefix('~/epp/*'), 'Kong strips the ~ before compiling the PCRE: ~/epp/* → /epp/*').toBe('/epp/*');
+		expect(
+			stripRegexPrefix('~/payments/*'),
+			'Kong strips the ~ before compiling the PCRE: ~/payments/* → /payments/*',
+		).toBe('/payments/*');
 	});
 
 	it('throws when called on a non-regex path (missing ~)', () => {
@@ -74,21 +77,22 @@ describe('stripRegexPrefix', () => {
 
 describe('classifyPath – traditional flavor (no start anchor)', () => {
 	it("classifies a ~ path as kind='regex' with regexSource stripped of ~", () => {
-		const p = classifyPath('~/epp/*', 'traditional');
-		expect(p.kind, "~/epp/* is a regex path in Kong's traditional router").toBe('regex');
-		expect(p.regexSource, 'The regex source should be the raw path minus the leading ~').toBe('/epp/*');
+		const p = classifyPath('~/payments/*', 'traditional');
+		expect(p.kind, "~/payments/* is a regex path in Kong's traditional router").toBe('regex');
+		expect(p.regexSource, 'The regex source should be the raw path minus the leading ~').toBe('/payments/*');
 	});
 
 	it('does NOT add a ^ start anchor for traditional flavor', () => {
-		const p = classifyPath('~/epp/*', 'traditional');
+		const p = classifyPath('~/payments/*', 'traditional');
 		expect(
 			p.regex?.source.startsWith('^'),
 			'Traditional flavor: Kong does not anchor regex paths at the start by default',
 		).toBe(false);
 		// JS serialises the regex source with escape sequences; verify the escaped form.
-		expect(p.regex?.source, 'The regex source for ~/epp/* in traditional flavor should be the bare PCRE pattern').toBe(
-			'\\/epp\\/*',
-		);
+		expect(
+			p.regex?.source,
+			'The regex source for ~/payments/* in traditional flavor should be the bare PCRE pattern',
+		).toBe('\\/payments\\/*');
 	});
 
 	it("classifies a plain path as kind='prefix'", () => {
@@ -100,15 +104,15 @@ describe('classifyPath – traditional flavor (no start anchor)', () => {
 
 describe('classifyPath – traditional_compatible flavor (^ start anchor)', () => {
 	it('adds a ^ start anchor to regex paths under traditional_compatible', () => {
-		const p = classifyPath('~/epp/*', 'traditional_compatible');
+		const p = classifyPath('~/payments/*', 'traditional_compatible');
 		expect(
 			p.regex?.source.startsWith('^'),
 			"Kong's transform.lua prefixes regex paths with ^ in traditional_compatible flavor",
 		).toBe(true);
 		expect(
 			p.regex?.source,
-			'The regex source for ~/epp/* in traditional_compatible should start with ^ (JS-escaped)',
-		).toBe('^\\/epp\\/*');
+			'The regex source for ~/payments/* in traditional_compatible should start with ^ (JS-escaped)',
+		).toBe('^\\/payments\\/*');
 	});
 
 	it('plain paths are unchanged by the flavor parameter', () => {
@@ -119,39 +123,42 @@ describe('classifyPath – traditional_compatible flavor (^ start anchor)', () =
 });
 
 describe('matchPath – regex paths', () => {
-	it('~/epp/* matches /epp/ (traditional: no end anchor → prefix-like)', () => {
-		const p = classifyPath('~/epp/*', 'traditional');
-		expect(matchPath(p, '/epp/'), 'Without an end anchor Kong regex routes behave like prefix matches').toBe(true);
+	it('~/payments/* matches /payments/ (traditional: no end anchor → prefix-like)', () => {
+		const p = classifyPath('~/payments/*', 'traditional');
+		expect(matchPath(p, '/payments/'), 'Without an end anchor Kong regex routes behave like prefix matches').toBe(true);
 	});
 
-	it('~/epp/* matches /epp-poc/docs – the motivating shadowing example', () => {
-		const p = classifyPath('~/epp/*', 'traditional');
-		// /epp/* → regex /epp/* → `/epp` followed by 0+ slashes.
-		// The regex matches /epp at the start of /epp-poc/docs.
+	it('~/payments/* matches /payments-v2/docs – the motivating shadowing example', () => {
+		const p = classifyPath('~/payments/*', 'traditional');
+		// /payments/* → regex /payments/* → `/payments` followed by 0+ slashes.
+		// The regex matches /payments at the start of /payments-v2/docs.
 		expect(
-			matchPath(p, '/epp-poc/docs'),
-			'This is the core of the problem: ~/epp/* (regex /epp/*) matches /epp-poc/docs ' +
+			matchPath(p, '/payments-v2/docs'),
+			'This is the core of the problem: ~/payments/* (regex /payments/*) matches /payments-v2/docs ' +
 				"because * in PCRE quantifies the previous char '/', not 'anything'",
 		).toBe(true);
 	});
 
-	it('~/epp(?:/.*)?$ does NOT match /epp-poc/docs (safe anchored alternative)', () => {
-		const p = classifyPath('~/epp(?:/.*)?$', 'traditional');
+	it('~/payments(?:/.*)?$ does NOT match /payments-v2/docs (safe anchored alternative)', () => {
+		const p = classifyPath('~/payments(?:/.*)?$', 'traditional');
 		expect(
-			matchPath(p, '/epp-poc/docs'),
-			'The anchored safe alternative ~/epp(?:/.*)?$ must not match /epp-poc/docs',
+			matchPath(p, '/payments-v2/docs'),
+			'The anchored safe alternative ~/payments(?:/.*)?$ must not match /payments-v2/docs',
 		).toBe(false);
 	});
 
-	it('~/epp(?:/.*)?$ matches /epp/something (correct match)', () => {
-		const p = classifyPath('~/epp(?:/.*)?$', 'traditional');
-		expect(matchPath(p, '/epp/something')).toBe(true);
+	it('~/payments(?:/.*)?$ matches /payments/something (correct match)', () => {
+		const p = classifyPath('~/payments(?:/.*)?$', 'traditional');
+		expect(matchPath(p, '/payments/something')).toBe(true);
 	});
 
-	it('~/epp-poc(?:/.*)?$ matches /epp-poc/docs and not /epp/docs', () => {
-		const p = classifyPath('~/epp-poc(?:/.*)?$', 'traditional');
-		expect(matchPath(p, '/epp-poc/docs'), 'The epp-poc safe alternative should match its own path').toBe(true);
-		expect(matchPath(p, '/epp/docs'), 'The epp-poc safe alternative must not match an unrelated /epp path').toBe(false);
+	it('~/payments-v2(?:/.*)?$ matches /payments-v2/docs and not /payments/docs', () => {
+		const p = classifyPath('~/payments-v2(?:/.*)?$', 'traditional');
+		expect(matchPath(p, '/payments-v2/docs'), 'The payments-v2 safe alternative should match its own path').toBe(true);
+		expect(
+			matchPath(p, '/payments/docs'),
+			'The payments-v2 safe alternative must not match an unrelated /payments path',
+		).toBe(false);
 	});
 });
 
@@ -220,13 +227,13 @@ describe('compareRoutes – Kong sort_routes tie-breaking (traditional.lua ~L681
 	it('between equal-length equal-priority regex routes, earlier created_at wins', () => {
 		const older = makeRoute({
 			id: 'r1',
-			paths: ['~/epp/*'],
+			paths: ['~/payments/*'],
 			regex_priority: 0,
 			created_at: 1000,
 		});
 		const newer = makeRoute({
 			id: 'r2',
-			paths: ['~/epp/*'],
+			paths: ['~/payments/*'],
 			regex_priority: 0,
 			created_at: 2000,
 		});
@@ -243,36 +250,36 @@ describe('compareRoutes – Kong sort_routes tie-breaking (traditional.lua ~L681
 		expect(compareRoutes(a, b), 'Fully identical routes (by ordering criteria) should compare as equal').toBe(0);
 	});
 
-	it('~/epp/* beats ~/epp-poc/* when both have equal regex_priority (length tie-break)', () => {
-		// ~/epp/* is 7 chars; ~/epp-poc/* is 11 chars.
-		// So ~/epp-poc/* should actually WIN by length… let's verify that.
-		const epp = makeRoute({ id: 'r1', paths: ['~/epp/*'], regex_priority: 0, created_at: 1000 });
-		const eppPoc = makeRoute({
+	it('~/payments/* beats ~/payments-v2/* when both have equal regex_priority (length tie-break)', () => {
+		// ~/payments/* is 7 chars; ~/payments-v2/* is 11 chars.
+		// So ~/payments-v2/* should actually WIN by length… let's verify that.
+		const payments = makeRoute({ id: 'r1', paths: ['~/payments/*'], regex_priority: 0, created_at: 1000 });
+		const paymentsV2 = makeRoute({
 			id: 'r2',
-			paths: ['~/epp-poc/*'],
+			paths: ['~/payments-v2/*'],
 			regex_priority: 0,
 			created_at: 1000,
 		});
 
 		expect(
-			compareRoutes(eppPoc, epp),
-			'~/epp-poc/* (11 chars) has a longer path than ~/epp/* (7 chars) ' +
-				'so ~/epp-poc/* wins by max_uri_length – but both still have the suspicious /* pattern',
+			compareRoutes(paymentsV2, payments),
+			'~/payments-v2/* (11 chars) has a longer path than ~/payments/* (7 chars) ' +
+				'so ~/payments-v2/* wins by max_uri_length – but both still have the suspicious /* pattern',
 		).toBeLessThan(0);
 	});
 
-	it('~/epp/* beats ~/epp-poc/* when ~/epp/* was created earlier (same length-adjusted priority)', () => {
+	it('~/payments/* beats ~/payments-v2/* when ~/payments/* was created earlier (same length-adjusted priority)', () => {
 		// Same regex_priority, same length → falls through to created_at.
-		const epp = makeRoute({ id: 'r1', paths: ['~/epp/*'], regex_priority: 0, created_at: 1000 });
-		const eppPocSameLen = makeRoute({
+		const payments = makeRoute({ id: 'r1', paths: ['~/payments/*'], regex_priority: 0, created_at: 1000 });
+		const paymentsV2SameLen = makeRoute({
 			id: 'r2',
-			paths: ['~/epp/*'], // same length to force created_at tie-break
+			paths: ['~/payments/*'], // same length to force created_at tie-break
 			regex_priority: 0,
 			created_at: 2000,
 		});
 
 		expect(
-			compareRoutes(epp, eppPocSameLen),
+			compareRoutes(payments, paymentsV2SameLen),
 			'When all other criteria are equal, the route created earlier (smaller created_at) wins',
 		).toBeLessThan(0);
 	});
@@ -312,77 +319,79 @@ describe('matchRoute – method and host filtering', () => {
 	});
 });
 
-describe('simulateRequest – the motivating ~/epp/* vs ~/epp-poc/* example', () => {
-	const eppRoute = makeRoute({
-		id: 'route-epp',
-		name: 'epp',
-		paths: ['~/epp/*'],
+describe('simulateRequest – the motivating ~/payments/* vs ~/payments-v2/* example', () => {
+	const paymentsRoute = makeRoute({
+		id: 'route-payments',
+		name: 'payments',
+		paths: ['~/payments/*'],
 		regex_priority: 0,
 		created_at: 1736500800, // earlier
 	});
 
-	const eppPocRoute = makeRoute({
-		id: 'route-epp-poc',
-		name: 'epp-poc',
-		paths: ['~/epp-poc/*'],
+	const paymentsV2Route = makeRoute({
+		id: 'route-payments-v2',
+		name: 'payments-v2',
+		paths: ['~/payments-v2/*'],
 		regex_priority: 0,
 		created_at: 1738742400, // later
 	});
 
-	const sorted = [eppPocRoute, eppRoute].sort(compareRoutes);
+	const sorted = [paymentsV2Route, paymentsRoute].sort(compareRoutes);
 
-	it('both routes match /epp-poc/docs (demonstrates the shadowing problem)', () => {
+	it('both routes match /payments-v2/docs (demonstrates the shadowing problem)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
-			path: '/epp-poc/docs',
+			path: '/payments-v2/docs',
 		});
 		expect(
 			result.matchedRoutes.length,
-			'Both ~/epp/* and ~/epp-poc/* must match /epp-poc/docs for the shadowing to occur',
+			'Both ~/payments/* and ~/payments-v2/* must match /payments-v2/docs for the shadowing to occur',
 		).toBeGreaterThanOrEqual(2);
 	});
 
-	it('~/epp-poc/* wins over ~/epp/* for /epp-poc/docs because it is longer (max_uri_length)', () => {
+	it('~/payments-v2/* wins over ~/payments/* for /payments-v2/docs because it is longer (max_uri_length)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
-			path: '/epp-poc/docs',
+			path: '/payments-v2/docs',
 		});
 		expect(
 			result.winner?.route.name,
-			'~/epp-poc/* (11 chars) is longer than ~/epp/* (7 chars) so it wins by max_uri_length',
-		).toBe('epp-poc');
+			'~/payments-v2/* (11 chars) is longer than ~/payments/* (7 chars) so it wins by max_uri_length',
+		).toBe('payments-v2');
 	});
 
-	it('~/epp/* still wins for /epp/something (correct routing)', () => {
+	it('~/payments/* still wins for /payments/something (correct routing)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
-			path: '/epp/something',
+			path: '/payments/something',
 		});
-		expect(result.winner?.route.name, '~/epp/* should win for its own path /epp/something').toBe('epp');
+		expect(result.winner?.route.name, '~/payments/* should win for its own path /payments/something').toBe('payments');
 	});
 
-	it('the explanation mentions the reason ~/epp-poc/* wins', () => {
+	it('the explanation mentions the reason ~/payments-v2/* wins', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
-			path: '/epp-poc/docs',
+			path: '/payments-v2/docs',
 		});
 		const fullExplanation = result.explanation.join('\n');
-		expect(fullExplanation, 'The explanation should mention the route name that wins').toContain('epp-poc');
+		expect(fullExplanation, 'The explanation should mention the route name that wins').toContain('payments-v2');
 	});
 
-	it('when ~/epp/* is older, it wins for a path matching only ~/epp/* (no collision for /epp/x)', () => {
-		// /epp/x only matches ~/epp/*, not ~/epp-poc/*
+	it('when ~/payments/* is older, it wins for a path matching only ~/payments/* (no collision for /payments/x)', () => {
+		// /payments/x only matches ~/payments/*, not ~/payments-v2/*
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
-			path: '/epp/x',
+			path: '/payments/x',
 		});
-		expect(result.matchedRoutes.length, 'Only ~/epp/* should match /epp/x').toBe(1);
-		expect(result.winner?.route.name, '/epp/x only matches ~/epp/*, so that route must be the winner').toBe('epp');
+		expect(result.matchedRoutes.length, 'Only ~/payments/* should match /payments/x').toBe(1);
+		expect(result.winner?.route.name, '/payments/x only matches ~/payments/*, so that route must be the winner').toBe(
+			'payments',
+		);
 	});
 });
 
@@ -484,12 +493,12 @@ describe('matchRoute – header constraints (traditional.lua MATCH_RULES.HEADER 
 		const route: KongRoute = {
 			id: 'r-header',
 			paths: ['/api'],
-			headers: { 'x-smp-env': ['dev', 'develop', 'development'] },
+			headers: { 'x-env': ['dev', 'develop', 'development'] },
 		};
 		const mr = marshalRoute(route, undefined, 'traditional');
 		expect(
 			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: {} }),
-			'When request has no headers and route requires x-smp-env, the route must not match',
+			'When request has no headers and route requires x-env, the route must not match',
 		).toBe(false);
 	});
 
@@ -497,12 +506,12 @@ describe('matchRoute – header constraints (traditional.lua MATCH_RULES.HEADER 
 		const route: KongRoute = {
 			id: 'r-header',
 			paths: ['/api'],
-			headers: { 'x-smp-env': ['dev', 'develop', 'development'] },
+			headers: { 'x-env': ['dev', 'develop', 'development'] },
 		};
 		const mr = marshalRoute(route, undefined, 'traditional');
 		expect(
-			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-smp-env': 'dev' } }),
-			'request header x-smp-env=dev matches allowed value "dev"',
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-env': 'dev' } }),
+			'request header x-env=dev matches allowed value "dev"',
 		).toBe(true);
 	});
 
@@ -510,11 +519,11 @@ describe('matchRoute – header constraints (traditional.lua MATCH_RULES.HEADER 
 		const route: KongRoute = {
 			id: 'r-header',
 			paths: ['/api'],
-			headers: { 'x-smp-env': ['dev'] },
+			headers: { 'x-env': ['dev'] },
 		};
 		const mr = marshalRoute(route, undefined, 'traditional');
 		expect(
-			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-smp-env': 'DEV' } }),
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-env': 'DEV' } }),
 			'header value matching is case-insensitive: "DEV" must match allowed value "dev"',
 		).toBe(true);
 	});
@@ -585,15 +594,15 @@ describe('matchRoute – header constraints (traditional.lua MATCH_RULES.HEADER 
 		const route: KongRoute = {
 			id: 'r-multi-value',
 			paths: ['/api'],
-			headers: { 'x-smp-env': ['dev', 'develop', 'development'] },
+			headers: { 'x-env': ['dev', 'develop', 'development'] },
 		};
 		const mr = marshalRoute(route, undefined, 'traditional');
 		expect(
-			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-smp-env': 'develop' } }),
-			'"develop" is one of the allowed values for x-smp-env → should match',
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-env': 'develop' } }),
+			'"develop" is one of the allowed values for x-env → should match',
 		).toBe(true);
 		expect(
-			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-smp-env': 'staging' } }),
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api', headers: { 'x-env': 'staging' } }),
 			'"staging" is not in the allowed values list → should not match',
 		).toBe(false);
 	});
@@ -622,7 +631,7 @@ describe('matchRoute – header constraints (traditional.lua MATCH_RULES.HEADER 
 		const route: KongRoute = {
 			id: 'r-header',
 			paths: ['/api'],
-			headers: { 'x-smp-env': ['dev'] },
+			headers: { 'x-env': ['dev'] },
 		};
 		const mr = marshalRoute(route, undefined, 'traditional');
 		expect(
@@ -657,7 +666,7 @@ describe('compareRoutes – header count sort tier (sort_routes L686–L688)', (
 		const withHeader: KongRoute = {
 			id: 'r-with',
 			paths: ['~/users/(.+)'],
-			headers: { 'x-smp-env': ['dev', 'develop', 'development'] },
+			headers: { 'x-env': ['dev', 'develop', 'development'] },
 		};
 		const noHeader: KongRoute = { id: 'r-without', paths: ['~/users/(.+)'] };
 		const mrWith = marshalRoute(withHeader, undefined, 'traditional');
@@ -725,22 +734,22 @@ describe('compareRoutes – regex_priority (sort_routes L692–L697)', () => {
 	});
 });
 
-describe('simulateRequest – header-constrained routing (real-world x-smp-env pattern)', () => {
+describe('simulateRequest – header-constrained routing (real-world x-env pattern)', () => {
 	// Mirrors the exact pattern seen in the integration control plane –
-	//   platform-authorisation2-dev-users   ~/users/([^/]+)  headers: {x-smp-env: [dev, develop, development]}
-	//   platform-authorisation2-internal-users  ~/users/([^/]+)  (no header constraint)
+	//   auth-dev-users   ~/users/([^/]+)  headers: {x-env: [dev, develop, development]}
+	//   auth-prod-users  ~/users/([^/]+)  (no header constraint)
 	const devRoute: KongRoute = {
 		id: 'auth-dev',
-		name: 'platform-authorisation2-dev-users',
+		name: 'auth-dev-users',
 		paths: ['~/users/([^/]+)'],
 		methods: ['GET'],
-		headers: { 'x-smp-env': ['dev', 'develop', 'development'] },
+		headers: { 'x-env': ['dev', 'develop', 'development'] },
 		regex_priority: 0,
 		created_at: 1700000000,
 	};
 	const internalRoute: KongRoute = {
 		id: 'auth-internal',
-		name: 'platform-authorisation2-internal-users',
+		name: 'auth-prod-users',
 		paths: ['~/users/([^/]+)'],
 		methods: ['GET'],
 		regex_priority: 0,
@@ -750,32 +759,32 @@ describe('simulateRequest – header-constrained routing (real-world x-smp-env p
 	const mrInternal = marshalRoute(internalRoute, undefined, 'traditional');
 	const sorted = [mrDev, mrInternal].sort(compareRoutes);
 
-	it('with x-smp-env:dev header, the dev route wins (header-constrained route has higher sort priority)', () => {
+	it('with x-env:dev header, the dev route wins (header-constrained route has higher sort priority)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'api.example.com',
 			path: '/users/alice',
-			headers: { 'x-smp-env': 'dev' },
+			headers: { 'x-env': 'dev' },
 		});
-		expect(result.winner?.route.id, 'dev route must win when x-smp-env=dev is present').toBe('auth-dev');
+		expect(result.winner?.route.id, 'dev route must win when x-env=dev is present').toBe('auth-dev');
 	});
 
-	it('without x-smp-env header, the internal (unconstrained) route wins', () => {
+	it('without x-env header, the internal (unconstrained) route wins', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'api.example.com',
 			path: '/users/alice',
 			headers: {}, // explicit empty = no headers
 		});
-		expect(result.winner?.route.id, 'internal route must win when x-smp-env header is absent').toBe('auth-internal');
+		expect(result.winner?.route.id, 'internal route must win when x-env header is absent').toBe('auth-internal');
 	});
 
-	it('with an unrecognised x-smp-env value, the internal route wins (dev route does not match)', () => {
+	it('with an unrecognised x-env value, the internal route wins (dev route does not match)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'api.example.com',
 			path: '/users/alice',
-			headers: { 'x-smp-env': 'production' },
+			headers: { 'x-env': 'production' },
 		});
 		expect(result.winner?.route.id, '"production" is not in dev route allowed values → internal route wins').toBe(
 			'auth-internal',

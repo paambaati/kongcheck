@@ -38,11 +38,11 @@ export interface KongService {
 export interface KongRoute {
 	/** The route's UUID. */
 	id: string;
-	/** Human-readable name, e.g. "epp-route". */
+	/** Human-readable name, e.g. "payments-route". */
 	name?: string;
 	/**
 	 * List of path patterns. A leading `~` indicates a regex path.
-	 * Example: `["~/epp/*", "/plain-prefix"]`
+	 * Example: `["~/payments/*", "/plain-prefix"]`
 	 */
 	paths?: string[];
 	/**
@@ -122,7 +122,7 @@ export type PathKind = 'regex' | 'prefix';
  * Derived from Kong's `uri_t` internal structure in `traditional.lua`.
  */
 export interface ParsedPath {
-	/** The raw path string as supplied by the user, e.g. `"~/epp/*"`. */
+	/** The raw path string as supplied by the user, e.g. `"~/payments/*"`. */
 	raw: string;
 	/** Whether this path is a regex path (raw starts with `~`). */
 	kind: PathKind;
@@ -131,7 +131,7 @@ export interface ParsedPath {
 	 * Only meaningful when `kind === "regex"`. Corresponds to `uri_t.regex` in
 	 * Kong's traditional router.
 	 *
-	 * @example For `~/epp/*` → `"/epp/*"`
+	 * @example For `~/payments/*` → `"/payments/*"`
 	 */
 	regexSource?: string;
 	/**
@@ -297,7 +297,7 @@ export interface SimRequest {
 	method: string;
 	/** Host header value, e.g. `"api.example.com"`. */
 	host: string;
-	/** Request URI path, e.g. `"/epp-poc/docs"`. */
+	/** Request URI path, e.g. `"/payments-v2/docs"`. */
 	path: string;
 	/** Optional request headers for header-constrained routes. */
 	headers?: Record<string, string>;

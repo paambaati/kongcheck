@@ -42,17 +42,17 @@ function route(id: string, name: string, paths: string[], overrides: Partial<Kon
 }
 
 describe('detectSuspiciousRegexIssues – catches glob-style * in PCRE paths', () => {
-	it("flags ~/epp/* because trailing /* is a PCRE quantifier on '/', not a glob", () => {
-		const issues = detectSuspiciousRegexIssues('~/epp/*');
+	it("flags ~/payments/* because trailing /* is a PCRE quantifier on '/', not a glob", () => {
+		const issues = detectSuspiciousRegexIssues('~/payments/*');
 		expect(
 			issues.length,
-			"~/epp/* must be flagged: * quantifies the previous '/' char, not 'anything'",
+			"~/payments/* must be flagged: * quantifies the previous '/' char, not 'anything'",
 		).toBeGreaterThan(0);
 	});
 
-	it('flags ~/epp-poc/* for the same reason', () => {
-		const issues = detectSuspiciousRegexIssues('~/epp-poc/*');
-		expect(issues.length, '~/epp-poc/* must also be flagged – same glob-style * mistake').toBeGreaterThan(0);
+	it('flags ~/payments-v2/* for the same reason', () => {
+		const issues = detectSuspiciousRegexIssues('~/payments-v2/*');
+		expect(issues.length, '~/payments-v2/* must also be flagged – same glob-style * mistake').toBeGreaterThan(0);
 	});
 
 	it('flags ~/foo/*/bar because /* in the middle also misuses *', () => {
@@ -60,24 +60,26 @@ describe('detectSuspiciousRegexIssues – catches glob-style * in PCRE paths', (
 		expect(issues.length, 'A /* in the middle of a regex path is equally suspicious').toBeGreaterThan(0);
 	});
 
-	it('flags ~/epp* because trailing * after a word char quantifies that char', () => {
-		const issues = detectSuspiciousRegexIssues('~/epp*');
+	it('flags ~/payments* because trailing * after a word char quantifies that char', () => {
+		const issues = detectSuspiciousRegexIssues('~/payments*');
 		expect(
 			issues.length,
-			"~/epp* means '/ep' followed by zero-or-more 'p' chars, not 'anything under /epp'",
+			"~/payments* means '/ep' followed by zero-or-more 'p' chars, not 'anything under /payments'",
 		).toBeGreaterThan(0);
 	});
 
-	it('does NOT flag ~/epp(?:/.*)?$ which is a correctly written anchored regex', () => {
-		const issues = detectSuspiciousRegexIssues('~/epp(?:/.*)?$');
-		expect(issues.length, '~/epp(?:/.*)?$ is a safe, correctly anchored pattern and should not be flagged').toBe(0);
+	it('does NOT flag ~/payments(?:/.*)?$ which is a correctly written anchored regex', () => {
+		const issues = detectSuspiciousRegexIssues('~/payments(?:/.*)?$');
+		expect(issues.length, '~/payments(?:/.*)?$ is a safe, correctly anchored pattern and should not be flagged').toBe(
+			0,
+		);
 	});
 
-	it('does NOT flag a plain (non-regex) path /epp/*', () => {
-		const issues = detectSuspiciousRegexIssues('/epp/*');
+	it('does NOT flag a plain (non-regex) path /payments/*', () => {
+		const issues = detectSuspiciousRegexIssues('/payments/*');
 		expect(
 			issues.length,
-			'/epp/* does not start with ~ so it is not a regex path; should not be flagged by this function',
+			'/payments/* does not start with ~ so it is not a regex path; should not be flagged by this function',
 		).toBe(0);
 	});
 
@@ -91,20 +93,22 @@ describe('detectSuspiciousRegexIssues – catches glob-style * in PCRE paths', (
 });
 
 describe('suggestRegexFix – generates safer replacement patterns', () => {
-	it('suggests ~/epp(?:/.*)?$ for ~/epp/*', () => {
-		const fix = suggestRegexFix('~/epp/*');
-		expect(fix, 'The safe fix for ~/epp/* should anchor the pattern and use (?:/.*)? to allow sub-paths').toBe(
-			'~/epp(?:/.*)?$',
+	it('suggests ~/payments(?:/.*)?$ for ~/payments/*', () => {
+		const fix = suggestRegexFix('~/payments/*');
+		expect(fix, 'The safe fix for ~/payments/* should anchor the pattern and use (?:/.*)? to allow sub-paths').toBe(
+			'~/payments(?:/.*)?$',
 		);
 	});
 
-	it('suggests ~/epp-poc(?:/.*)?$ for ~/epp-poc/*', () => {
-		const fix = suggestRegexFix('~/epp-poc/*');
-		expect(fix, 'The safe fix for ~/epp-poc/* should match the entire /epp-poc sub-tree').toBe('~/epp-poc(?:/.*)?$');
+	it('suggests ~/payments-v2(?:/.*)?$ for ~/payments-v2/*', () => {
+		const fix = suggestRegexFix('~/payments-v2/*');
+		expect(fix, 'The safe fix for ~/payments-v2/* should match the entire /payments-v2 sub-tree').toBe(
+			'~/payments-v2(?:/.*)?$',
+		);
 	});
 
 	it('returns undefined for a path that is not flagged', () => {
-		const fix = suggestRegexFix('~/epp(?:/.*)?$');
+		const fix = suggestRegexFix('~/payments(?:/.*)?$');
 		expect(fix, 'No suggestion should be generated for a path that is already safe').toBeUndefined();
 	});
 
@@ -117,20 +121,20 @@ describe('suggestRegexFix – generates safer replacement patterns', () => {
 describe('generateCandidateRequests – produces covering test paths from route patterns', () => {
 	it("generates at least one path derived from each route's path patterns", () => {
 		const routes = [
-			marshalRoute(route('r1', 'epp', ['~/epp/*'])),
-			marshalRoute(route('r2', 'epp-poc', ['~/epp-poc/*'])),
+			marshalRoute(route('r1', 'payments', ['~/payments/*'])),
+			marshalRoute(route('r2', 'payments-v2', ['~/payments-v2/*'])),
 		];
 		const candidates = generateCandidateRequests(routes);
 		expect(candidates.length, 'At least one candidate path must be generated per route').toBeGreaterThanOrEqual(2);
 	});
 
-	it('candidates include child paths (e.g. /epp/extra) to trigger deeper collisions', () => {
-		const routes = [marshalRoute(route('r1', 'epp', ['/epp']))];
+	it('candidates include child paths (e.g. /payments/extra) to trigger deeper collisions', () => {
+		const routes = [marshalRoute(route('r1', 'payments', ['/payments']))];
 		const candidates = generateCandidateRequests(routes);
 		const paths = candidates.map((c) => c.path);
 		expect(
-			paths.some((p) => p.startsWith('/epp/')),
-			'Candidate generation should include child paths like /epp/extra to test deeper collisions',
+			paths.some((p) => p.startsWith('/payments/')),
+			'Candidate generation should include child paths like /payments/extra to test deeper collisions',
 		).toBe(true);
 	});
 
@@ -143,32 +147,32 @@ describe('generateCandidateRequests – produces covering test paths from route 
 	});
 });
 
-describe('analyzeRoutes – the motivating ~/epp/* vs ~/epp-poc/* example', () => {
+describe('analyzeRoutes – the motivating ~/payments/* vs ~/payments-v2/* example', () => {
 	const config = makeConfig([
-		route('r-epp', 'epp', ['~/epp/*'], {
+		route('r-payments', 'payments', ['~/payments/*'], {
 			regex_priority: 0,
 			created_at: 1_700_000_000,
 		}),
-		route('r-epp-poc', 'epp-poc', ['~/epp-poc/*'], {
+		route('r-payments-v2', 'payments-v2', ['~/payments-v2/*'], {
 			regex_priority: 0,
 			created_at: 1_710_000_000,
 		}),
 	]);
 
-	it('produces at least one finding for the epp / epp-poc pair', () => {
+	it('produces at least one finding for the payments / payments-v2 pair', () => {
 		const findings = analyzeRoutes(config);
 		expect(
 			findings.length,
-			'The ~/epp/* vs ~/epp-poc/* pair is a textbook shadowing case and must produce findings',
+			'The ~/payments/* vs ~/payments-v2/* pair is a textbook shadowing case and must produce findings',
 		).toBeGreaterThan(0);
 	});
 
-	it('produces a suspicious_regex finding for ~/epp/* (glob-style * usage)', () => {
+	it('produces a suspicious_regex finding for ~/payments/* (glob-style * usage)', () => {
 		const findings = analyzeRoutes(config);
 		const suspicious = findings.filter((f) => f.type === 'suspicious_regex');
 		expect(
 			suspicious.length,
-			'Both ~/epp/* and ~/epp-poc/* should be flagged as suspicious regex patterns',
+			'Both ~/payments/* and ~/payments-v2/* should be flagged as suspicious regex patterns',
 		).toBeGreaterThanOrEqual(1);
 	});
 
@@ -199,7 +203,7 @@ describe('analyzeRoutes – the motivating ~/epp/* vs ~/epp-poc/* example', () =
 		).toBeGreaterThan(0);
 	});
 
-	it('suggestions for ~/epp/* include an anchored alternative ending with $', () => {
+	it('suggestions for ~/payments/* include an anchored alternative ending with $', () => {
 		const findings = analyzeRoutes(config);
 		const allSuggestions = findings.flatMap((f) => f.suggestions);
 		expect(
@@ -220,42 +224,45 @@ describe('analyzeRoutes – the motivating ~/epp/* vs ~/epp-poc/* example', () =
 	});
 });
 
-describe('analyzeRoutes – plain prefix sibling overlap /epp vs /epp-poc', () => {
+describe('analyzeRoutes – plain prefix sibling overlap /payments vs /payments-v2', () => {
 	const config = makeConfig([
-		route('r1', 'epp', ['/epp'], { created_at: 1_700_000_000 }),
-		route('r2', 'epp-poc', ['/epp-poc'], { created_at: 1_710_000_000 }),
+		route('r1', 'payments', ['/payments'], { created_at: 1_700_000_000 }),
+		route('r2', 'payments-v2', ['/payments-v2'], { created_at: 1_710_000_000 }),
 	]);
 
-	it('detects that /epp prefix matches /epp-poc requests (sibling overlap)', () => {
+	it('detects that /payments prefix matches /payments-v2 requests (sibling overlap)', () => {
 		const findings = analyzeRoutes(config);
 		const overlap = findings.filter((f) => f.type === 'shadowing' || f.type === 'collision');
 		expect(
 			overlap.length,
-			"Plain prefix /epp matches /epp-poc because startsWith('/epp') is true for /epp-poc",
+			"Plain prefix /payments matches /payments-v2 because startsWith('/payments') is true for /payments-v2",
 		).toBeGreaterThan(0);
 	});
 });
 
 describe('analyzeRoutes – clean configuration produces no high-severity findings', () => {
-	const config = makeConfig([route('r1', 'epp', ['~/epp(?:/.*)?$']), route('r2', 'epp-poc', ['~/epp-poc(?:/.*)?$'])]);
+	const config = makeConfig([
+		route('r1', 'payments', ['~/payments(?:/.*)?$']),
+		route('r2', 'payments-v2', ['~/payments-v2(?:/.*)?$']),
+	]);
 
 	it('produces no shadowing or collision findings when routes use safe anchored patterns', () => {
 		const findings = analyzeRoutes(config);
 		const high = findings.filter((f) => (f.type === 'shadowing' || f.type === 'collision') && f.severity === 'HIGH');
 		expect(
 			high.length,
-			'Correctly anchored regex paths ~/epp(?:/.*)?$ and ~/epp-poc(?:/.*)?$ should not shadow each other',
+			'Correctly anchored regex paths ~/payments(?:/.*)?$ and ~/payments-v2(?:/.*)?$ should not shadow each other',
 		).toBe(0);
 	});
 });
 
 describe('analyzeRoutes – routes for different services are rated HIGH severity', () => {
 	const config = makeConfig([
-		route('r1', 'epp', ['~/epp/*'], {
+		route('r1', 'payments', ['~/payments/*'], {
 			service: { id: 'svc-a' },
 			created_at: 1_700_000_000,
 		}),
-		route('r2', 'epp-poc', ['~/epp-poc/*'], {
+		route('r2', 'payments-v2', ['~/payments-v2/*'], {
 			service: { id: 'svc-b' },
 			created_at: 1_710_000_000,
 		}),
@@ -283,11 +290,11 @@ describe('analyzeRoutes – routes for different services are rated HIGH severit
 
 describe('analyzeRoutes – expressions flavor emits no false positives from anchor differences', () => {
 	// Under expressions/traditional_compatible, regex paths get ^ anchored.
-	// ~/epp-poc/* becomes ^/epp-poc/* which still matches /epp-poc/... correctly.
+	// ~/payments-v2/* becomes ^/payments-v2/* which still matches /payments-v2/... correctly.
 	const config = makeConfig(
 		[
-			route('r1', 'epp', ['~/epp/*'], { created_at: 1_700_000_000 }),
-			route('r2', 'epp-poc', ['~/epp-poc/*'], { created_at: 1_710_000_000 }),
+			route('r1', 'payments', ['~/payments/*'], { created_at: 1_700_000_000 }),
+			route('r2', 'payments-v2', ['~/payments-v2/*'], { created_at: 1_710_000_000 }),
 		],
 		'traditional_compatible',
 	);
@@ -304,7 +311,7 @@ describe('analyzeRoutes – routes with multiple paths are split correctly', () 
 	// MarshalledRoutes so that max_uri_length scoring works per-path.
 	const config = makeConfig([
 		{
-			...route('r1', 'multi-path', ['~/epp/*', '~/epp-poc/*']),
+			...route('r1', 'multi-path', ['~/payments/*', '~/payments-v2/*']),
 		},
 		route('r2', 'other', ['/other'], { created_at: 1_710_000_000 }),
 	]);
@@ -322,8 +329,8 @@ describe('analyzeRoutes – routes with multiple paths are split correctly', () 
 		const suspicious = findings.filter((f) => f.type === 'suspicious_regex');
 		const involvedPaths = suspicious.flatMap((f) => f.routes.flatMap((r) => r.paths ?? []));
 		expect(
-			involvedPaths.some((p) => p === '~/epp/*'),
-			'~/epp/* must be individually flagged even when it shares a KongRoute with ~/epp-poc/*',
+			involvedPaths.some((p) => p === '~/payments/*'),
+			'~/payments/* must be individually flagged even when it shares a KongRoute with ~/payments-v2/*',
 		).toBe(true);
 	});
 });
@@ -366,19 +373,19 @@ describe('analyzeRoutes – universal_matcher INFO findings (includeInfo: true)'
 	});
 });
 
-describe('suggestRegexFix – word-char trailing * pattern (~/epp*)', () => {
-	it('suggests an anchored alternative for ~/epp* (trailing * after word char)', () => {
-		const fix = suggestRegexFix('~/epp*');
-		expect(fix, 'suggestRegexFix must return a non-empty suggestion for the ~/epp* pattern').toBeDefined();
+describe('suggestRegexFix – word-char trailing * pattern (~/payments*)', () => {
+	it('suggests an anchored alternative for ~/payments* (trailing * after word char)', () => {
+		const fix = suggestRegexFix('~/payments*');
+		expect(fix, 'suggestRegexFix must return a non-empty suggestion for the ~/payments* pattern').toBeDefined();
 		expect(fix, 'Suggestion should use $ end anchor to prevent unintentional prefix matching').toContain('$');
-		expect(fix, 'Suggestion should preserve the /epp stem').toContain('/epp');
+		expect(fix, 'Suggestion should preserve the /payments stem').toContain('/payments');
 	});
 
-	it('flags ~/epp* as suspicious (trailing * after word char quantifies that char)', () => {
-		const issues = detectSuspiciousRegexIssues('~/epp*');
+	it('flags ~/payments* as suspicious (trailing * after word char quantifies that char)', () => {
+		const issues = detectSuspiciousRegexIssues('~/payments*');
 		expect(
 			issues.length,
-			"~/epp* must be flagged: trailing * quantifies 'p' (zero or more p's), not anything after /epp",
+			"~/payments* must be flagged: trailing * quantifies 'p' (zero or more p's), not anything after /payments",
 		).toBeGreaterThan(0);
 	});
 });
@@ -409,8 +416,8 @@ describe('analyzeRoutes – parent/child paths are NOT flagged as sibling collis
 	// everything else. There is no ambiguity and no false bleed.
 	it('does NOT flag /chat vs /chat/history as a sibling overlap', () => {
 		const config = makeConfig([
-			route('r1', 'adk-chat', ['/genai/v1/python-adk/chat'], { created_at: 1_740_000_000 }),
-			route('r2', 'adk-history', ['/genai/v1/python-adk/chat/history'], { created_at: 1_740_000_000 }),
+			route('r1', 'adk-chat', ['/api/v1/chat'], { created_at: 1_740_000_000 }),
+			route('r2', 'adk-history', ['/api/v1/chat/history'], { created_at: 1_740_000_000 }),
 		]);
 		const findings = analyzeRoutes(config);
 		const overlaps = findings.filter((f) => f.type === 'shadowing' || f.type === 'collision');
@@ -433,16 +440,16 @@ describe('analyzeRoutes – parent/child paths are NOT flagged as sibling collis
 		).toBe(0);
 	});
 
-	it('still flags /epp vs /epp-poc as a mid-segment bleed', () => {
+	it('still flags /payments vs /payments-v2 as a mid-segment bleed', () => {
 		const config = makeConfig([
-			route('r1', 'epp', ['/epp'], { created_at: 1_700_000_000 }),
-			route('r2', 'epp-poc', ['/epp-poc'], { created_at: 1_710_000_000 }),
+			route('r1', 'payments', ['/payments'], { created_at: 1_700_000_000 }),
+			route('r2', 'payments-v2', ['/payments-v2'], { created_at: 1_710_000_000 }),
 		]);
 		const findings = analyzeRoutes(config);
 		const overlaps = findings.filter((f) => f.type === 'shadowing' || f.type === 'collision');
 		expect(
 			overlaps.length,
-			'/epp bleeds into /epp-poc mid-segment (the - is not a path separator); must still be flagged',
+			'/payments bleeds into /payments-v2 mid-segment (the - is not a path separator); must still be flagged',
 		).toBeGreaterThan(0);
 	});
 });
@@ -493,14 +500,14 @@ describe('analyzeRoutes – {variable} placeholder regex paths do not generate f
 	// the plain-prefix parent route and must not be flagged.
 	it('does NOT flag a {id}-style regex route as shadowing its plain-prefix parent', () => {
 		const config = makeConfig([
-			route('r1', 'agents-list', ['/genai/v1/agents'], { created_at: 1_700_000_000 }),
-			route('r2', 'agent-by-id', ['~/genai/v1/agents/{id}/sources'], { created_at: 1_710_000_000 }),
+			route('r1', 'agents-list', ['/api/v1/agents'], { created_at: 1_700_000_000 }),
+			route('r2', 'agent-by-id', ['~/api/v1/agents/{id}/sources'], { created_at: 1_710_000_000 }),
 		]);
 		const findings = analyzeRoutes(config);
 		const collisions = findings.filter((f) => f.type === 'shadowing' || f.type === 'collision');
 		expect(
 			collisions.length,
-			'~/genai/v1/agents/{id}/sources uses a literal {id} in PCRE; must not shadow the plain prefix route',
+			'~/api/v1/agents/{id}/sources uses a literal {id} in PCRE; must not shadow the plain prefix route',
 		).toBe(0);
 	});
 });
@@ -523,7 +530,7 @@ describe('generateCandidateRequests – capture groups become id placeholders', 
 	});
 
 	it('replaces {variable} template placeholders with "id"', () => {
-		const routes = [marshalRoute(route('r1', 'agents', ['~/genai/v1/agents/{agentId}/sources']))];
+		const routes = [marshalRoute(route('r1', 'agents', ['~/api/v1/agents/{agentId}/sources']))];
 		const candidates = generateCandidateRequests(routes);
 		const paths = candidates.map((c) => c.path);
 		expect(
@@ -606,12 +613,12 @@ describe('analyzeRoutes – header-stratified identical-path pair is INFO', () =
 	// cross-service misrouting occurs — this is intentional traffic partitioning.
 	const configWithServices: KonnectData = {
 		routes: [
-			route('r-dev', 'platform-auth-dev-userinfo', ['/userinfo'], {
+			route('r-dev', 'auth-dev-users', ['/userinfo'], {
 				headers: { 'x-internal': ['dev'] },
 				service: { id: 'svc-dev' },
 				created_at: 1_700_000_001,
 			}),
-			route('r-internal', 'platform-auth-internal-userinfo', ['/userinfo'], {
+			route('r-internal', 'auth-prod-users', ['/userinfo'], {
 				service: { id: 'svc-internal' },
 				created_at: 1_700_000_000,
 			}),

@@ -56,10 +56,10 @@ jobs:
       - uses: ruby/setup-ruby@v1
         name: Setup Ruby
         with:
-          ruby-version: ruby # latest stable; ERB is in stdlib, no gems needed
+          ruby-version: ruby
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --omit dev
 
       # Bun cross-compiles all targets from a single Linux runner.
       - name: Build platform binaries

@@ -193,7 +193,7 @@ This is not really a gap — it is a deliberate design choice. When a broad-rege
 
 The documentation calls this out explicitly:
 
-> A route with `path=~/users/([^/]+)` and `headers={x-smp-env:[dev,...]}` intercepts `/marketing/userprofile/users/resend-activation-email` in any dev environment where every request carries `x-smp-env:dev`.
+> A route with `path=~/users/([^/]+)` and `headers={x-env:[dev,...]}` intercepts `/marketing/userprofile/users/resend-activation-email` in any dev environment where every request carries `x-env:dev`.
 
 The finding is intentionally conservative. Suppressing it would require proving that the header constraint fully partitions the traffic space between the two routes — which requires the identical-path precondition (gap 3/4 above).
 

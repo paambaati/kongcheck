@@ -8,8 +8,8 @@
  *
  * 1. **Suspicious regex paths** – regex paths that use `*` as if it were a
  *    glob wildcard. In PCRE, `*` is a quantifier on the *previous* token, not
- *    "anything". Users frequently write `~/epp/*` expecting it to mean
- *    "anything under /epp/", but it actually means "/epp" followed by zero or
+ *    "anything". Users frequently write `~/payments/*` expecting it to mean
+ *    "anything under /payments/", but it actually means "/payments" followed by zero or
  *    more slashes – which can match unintended sibling paths.
  *
  * 2. **Shadowing / collision** – two or more routes match overlapping request
@@ -17,7 +17,7 @@
  *    routes' own path patterns and simulates each one to find collisions.
  *
  * 3. **Sibling namespace overlaps** – plain prefix or regex routes whose path
- *    prefixes share a common stem (e.g. `/epp` and `/epp-poc`) where one
+ *    prefixes share a common stem (e.g. `/payments` and `/payments-v2`) where one
  *    could be shadowed by the other.
  *
  * @see src/router.ts – compareRoutes, simulateRequest
@@ -31,7 +31,7 @@ import type { Finding, KonnectData, MarshalledRoute, RouterFlavor, Severity, Sim
  * wrote PCRE instead. Each entry is a human-readable description of the
  * problem.
  *
- * Based on the motivating example in the problem statement: `~/epp/*` where
+ * Based on the motivating example in the problem statement: `~/payments/*` where
  * `*` is used as a glob but has PCRE quantifier semantics (zero or more of
  * the previous character).
  */
@@ -68,8 +68,8 @@ const SUSPICIOUS_REGEX_PATTERNS: Array<{
 		test: /[a-zA-Z0-9]\*$/,
 		description:
 			'Trailing `*` after a word character quantifies that character (zero or more occurrences), ' +
-			'not the whole path segment. E.g. `~/epp*` matches `/ep`, `/epp`, `/eppp`, etc., ' +
-			'but NOT `/epp/anything`.',
+			'not the whole path segment. E.g. `~/payments*` matches `/payment`, `/payments`, `/paymentss`, etc., ' +
+			'but NOT `/payments/anything`.',
 		suggestion: (raw: string) => {
 			const stem = raw.slice(1).replace(/[a-zA-Z0-9]\*$/, (m) => m[0]!);
 			return `~${stem}(?:/.*)?$`;
@@ -156,11 +156,11 @@ export function suggestRegexFix(raw: string): string | undefined {
  *
  * The goal is to produce paths that are likely to trigger collisions between
  * sibling routes –
- *  - The base path itself (e.g. `/epp-poc/docs`)
- *  - A child path (e.g. `/epp-poc/docs/sub`)
- *  - A sibling path (e.g. `/epp-docs`)
+ *  - The base path itself (e.g. `/payments-v2/docs`)
+ *  - A child path (e.g. `/payments-v2/docs/sub`)
+ *  - A sibling path (e.g. `/payments-docs`)
  *  - Slash/no-slash variants
- *  - The parent path (e.g. `/epp-poc`)
+ *  - The parent path (e.g. `/payments-v2`)
  *
  * @param routes - All marshalled routes; their path patterns are used as seeds.
  * @returns Deduplicated list of candidate {@link SimRequest} objects.
@@ -440,7 +440,7 @@ function lintSuspiciousRegex(routes: MarshalledRoute[], flavor: RouterFlavor): F
  * inside every winner plain-prefix path.
  *
  * Example: loser=/chat, winner=/chat/history → `/chat/history`.startsWith(`/chat/`) → true.
- * Example: loser=/epp, winner=/epp-poc → `/epp-poc`.startsWith(`/epp/`) → false.
+ * Example: loser=/payments, winner=/payments-v2 → `/payments-v2`.startsWith(`/payments/`) → false.
  *
  * This identifies legitimate parent→child routing hierarchies that are handled
  * correctly and deterministically by Kong's max_uri_length tie-breaker. Only
@@ -896,8 +896,8 @@ function buildCollisionSuggestions(winner: MarshalledRoute, loser: MarshalledRou
  * Detects route pairs whose path prefixes share a common stem but where
  * simulation (pass 2) may not have generated a covering request.
  *
- * Classic example: `/epp` and `/epp-poc` — a route matching the prefix `/epp`
- * will also match requests to `/epp-poc/...`.
+ * Classic example: `/payments` and `/payments-v2` — a route matching the prefix `/payments`
+ * will also match requests to `/payments-v2/...`.
  *
  * Only emits findings for pairs not already covered by the collision pass.
  */
