@@ -35,6 +35,7 @@ import type { KonnectContext } from './formatter.ts';
 import { startMcpServer } from './mcp.ts';
 import { compareRoutes, marshalRoute, simulateRequest } from './router.ts';
 import type { Finding, KonnectConfig, KonnectData, RouterFlavor } from './types.ts';
+import { normalizePath } from './utils.ts';
 
 const cli = cac(name);
 
@@ -220,15 +221,35 @@ cli
 	})
 	.option('--path <path>', 'Request path, e.g. /payments-v2/docs')
 	.option('--header <header>', 'Request header as key:value (repeat for multiple), e.g. --header x-env:dev')
+	.option('--sni <sni>', 'TLS SNI value for stream-route simulation, e.g. api.example.com')
+	.option('--source-ip <ip>', 'Source IP address for stream-route simulation, e.g. 10.0.0.5')
+	.option('--source-port <port>', 'Source TCP/UDP port for stream-route simulation, e.g. 54321')
+	.option('--dest-ip <ip>', 'Destination IP address for stream-route simulation, e.g. 192.168.1.1')
+	.option('--dest-port <port>', 'Destination TCP/UDP port for stream-route simulation, e.g. 5432')
 	.example(
 		'  kongcheck explain-request --control-plane-id <id> --token $TOKEN ' +
 			'--method GET --host example.com --path /payments-v2/docs',
+	)
+	.example(
+		'  # Simulate a stream-route connection (SNI + source IP)\n' +
+			'  kongcheck explain-request --path /tcp/service --sni api.example.com --source-ip 10.0.0.5',
 	)
 	.action(async (options: Record<string, unknown>) => {
 		const reqPath = options['path'] as string | undefined;
 		if (!reqPath) {
 			console.error('Error: --path is required for explain-request.');
 			process.exit(1);
+		}
+
+		// Normalize the path the same way Kong does before matching –
+		//   1. Strip the query string (everything from '?' onwards).
+		//   2. Percent-decode path segments.
+		//   3. Resolve '.' and '..' segments via URL parsing.
+		// Warn if normalization changed the value, so the user knows
+		// the actual path being tested.
+		const normalizedPath = normalizePath(reqPath);
+		if (normalizedPath !== reqPath) {
+			console.warn(`Warning: --path was normalized from '${reqPath}' to '${normalizedPath}'.`);
 		}
 
 		const verbose = !!options['verbose'];
@@ -274,24 +295,60 @@ cli
 			reqHeaders[key] = val;
 		}
 
+		// Parse L4 / stream-route simulation fields.
+		// --source-port and --dest-port arrive as strings from the CLI parser.
+		const sni = options['sni'] as string | undefined;
+		const sourceIp = options['sourceIp'] as string | undefined;
+		const destIp = options['destIp'] as string | undefined;
+
+		const rawSourcePort = options['sourcePort'];
+		const sourcePort: number | undefined = rawSourcePort !== undefined ? Number(rawSourcePort) : undefined;
+		if (sourcePort !== undefined && (!Number.isInteger(sourcePort) || sourcePort < 1 || sourcePort > 65535)) {
+			console.error(`Error: --source-port must be an integer between 1 and 65535, got '${String(rawSourcePort)}'`);
+			process.exit(1);
+		}
+
+		const rawDestPort = options['destPort'];
+		const destPort: number | undefined = rawDestPort !== undefined ? Number(rawDestPort) : undefined;
+		if (destPort !== undefined && (!Number.isInteger(destPort) || destPort < 1 || destPort > 65535)) {
+			console.error(`Error: --dest-port must be an integer between 1 and 65535, got '${String(rawDestPort)}'`);
+			process.exit(1);
+		}
+
 		const result = simulateRequest(sorted, {
 			method: (options['method'] as string) ?? 'GET',
 			host: (options['host'] as string) ?? 'example.com',
-			path: reqPath,
+			path: normalizedPath,
 			// Pass headers map so header-constrained routes are evaluated strictly.
 			// An empty object means "no headers" (routes requiring headers won't match).
 			headers: reqHeaders,
+			// L4 fields: only set when the flag was provided (undefined = skip the check).
+			sni,
+			sourceIp,
+			sourcePort,
+			destIp,
+			destPort,
 		});
 
 		const format = (options['format'] as string | undefined) ?? 'human';
 		const ctx = resolveKonnectContext(fetched);
-		const headerSummary =
-			Object.keys(reqHeaders).length > 0
-				? '  headers: ' +
+
+		// Build a compact "simulated with" summary covering both headers and L4 fields.
+		const simulatedParts: string[] = [];
+		if (Object.keys(reqHeaders).length > 0) {
+			simulatedParts.push(
+				'headers: ' +
 					Object.entries(reqHeaders)
 						.map(([k, v]) => `${k}=${v}`)
-						.join(', ')
-				: '';
+						.join(', '),
+			);
+		}
+		if (sni !== undefined) simulatedParts.push(`sni: ${sni}`);
+		if (sourceIp !== undefined)
+			simulatedParts.push(`source: ${sourceIp}${sourcePort !== undefined ? `:${sourcePort}` : ''}`);
+		if (destIp !== undefined) simulatedParts.push(`dest: ${destIp}${destPort !== undefined ? `:${destPort}` : ''}`);
+		const simulatedWith = simulatedParts.length > 0 ? '  ' + simulatedParts.join('  ') : '';
+
 		if (format === 'json') {
 			const jsonResult = {
 				...result,
@@ -310,7 +367,7 @@ cli
 		} else {
 			if (!result.winner) {
 				console.log(`No route matched: ${result.request.method} ${result.request.path}`);
-				if (headerSummary) console.log(headerSummary);
+				if (simulatedWith) console.log(simulatedWith);
 			} else {
 				const name = result.winner.route.name ?? result.winner.route.id;
 				const winnerUrl = konnectRouteUrl(result.winner.route.id, ctx);
@@ -318,7 +375,7 @@ cli
 					`\nWinning route: ${name}  (id: ${result.winner.route.id})` +
 						(winnerUrl ? `\n               ${winnerUrl}` : ''),
 				);
-				if (headerSummary) console.log('\nSimulated with' + headerSummary);
+				if (simulatedWith) console.log('\nSimulated with' + simulatedWith);
 				console.log(`\nExplanation:`);
 				for (const line of result.explanation) {
 					console.log(`  ${line}`);

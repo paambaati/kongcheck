@@ -191,16 +191,17 @@ kongcheck collisions --format json
 
 ### `explain-request`
 
-**Request simulation** – simulates a specific HTTP request against your live route configuration and tells you exactly which route wins and why.
+**Request simulation** – simulates a specific request against your live route configuration and tells you exactly which route wins and why.
 
 **When to use** – when a request in production is hitting the wrong backend and you want to understand why. Ideal for debugging "why is `/api/v1/users` going to the wrong service?" type questions.
 
 ```bash
+# Minimal – path is the only required flag
 kongcheck explain-request --path /api/v1/users
 ```
 
 ```bash
-# Simulate a specific method + host + path combination
+# Simulate a specific method + host + path
 kongcheck explain-request \
   --method POST \
   --host api.example.com \
@@ -210,11 +211,51 @@ kongcheck explain-request \
 kongcheck explain-request --path /api/v1/users --format json
 ```
 
+```bash
+# Simulate a header-constrained route (e.g. x-env routing)
+kongcheck explain-request \
+  --path /userinfo \
+  --header x-env:dev        # → should route to the dev service
+
+kongcheck explain-request \
+  --path /userinfo          # no header → should route to the prod service
+```
+
+```bash
+# Simulate a stream (TCP/TLS) connection by TLS SNI value
+kongcheck explain-request \
+  --path /tcp/service \
+  --sni api.example.com
+
+# Simulate with source IP and port (Kong sources constraint)
+kongcheck explain-request \
+  --path /tcp/service \
+  --source-ip 10.0.0.5 \
+  --source-port 54321
+
+# Simulate with destination IP and port (Kong destinations constraint)
+kongcheck explain-request \
+  --path /db-proxy \
+  --dest-ip 192.168.1.10 \
+  --dest-port 5432
+
+# Combine L4 fields for a fully-specified stream connection
+kongcheck explain-request \
+  --path /tcp/service \
+  --sni api.example.com \
+  --source-ip 10.0.0.5 \
+  --dest-ip 192.168.1.10 \
+  --dest-port 443
+```
+
 The output shows –
 
-- The **winning route** name and ID
-- A step-by-step **explanation** of why it won (host-type ordering, header count, `regex_priority`, path specificity, creation date tie-breaking)
-- All **other routes that also matched**, in priority order
+- The **winning route** name and ID.
+- A step-by-step **explanation** of why it won (host-type ordering, header count, `regex_priority`, path specificity, creation date tie-breaking).
+- All **other routes that also matched**, in priority order.
+- A **"Simulated with"** line listing any headers or L4 fields that were applied.
+
+**L4 simulation semantics:** when `--sni`, `--source-ip`, or `--dest-ip` are provided, the corresponding route constraints (`snis`, `sources`, `destinations`) are evaluated strictly — a route that requires a different SNI or IP range will not match. When those flags are omitted, the constraints are skipped (conservative mode: every route is a candidate regardless of its L4 constraints). This is the same approach used for `--header`.
 
 ---
 
@@ -629,22 +670,6 @@ When the winner has a **broader regex path** than the loser (non-identical paths
 
 ---
 
-### URI normalization and query-string stripping
-
-Before matching, Kong strips the query string from the request URI and normalizes percent-encoding and `.`/`..` path segments. `kongcheck` takes the path exactly as you supply it.
-
-**Not caught by this tool**
-
-```bash
-# These two simulate differently even though Kong treats them as the same path –
-kongcheck explain-request --path /api/v1
-kongcheck explain-request --path /api/v1?debug=1   # ← '?' and beyond included in prefix check
-```
-
-Always pass a clean path (no query string) to `explain-request`.
-
----
-
 ### PCRE backtracking limit (`(*LIMIT_MATCH=10000)`)
 
 Kong prepends `(*LIMIT_MATCH=10000)` to every compiled regex path. This caps PCRE backtracking at 10 000 steps and prevents catastrophic backtracking from hanging the gateway. JavaScript's `RegExp` engine has no equivalent control.
@@ -658,28 +683,6 @@ Kong prepends `(*LIMIT_MATCH=10000)` to every compiled regex path. This caps PCR
 ```
 
 In practice this only affects intentionally or accidentally malformed regex paths. The `suspicious_regex` finding flags patterns that use `*` as a glob (a common source of degenerate patterns), which partially mitigates this.
-
----
-
-### SNI, source IP, and destination IP/port constraints
-
-Kong supports matching on TLS SNI values, client source IP/CIDR and port, and destination IP/CIDR and port. These are L4 (stream) routing fields.
-
-`kongcheck` does not evaluate any of these constraints. **All three are completely ignored.**
-
-**Not caught by this tool**
-
-```
-# Route A: snis=["api.example.com"]       (TLS SNI match)
-# Route B: sources=[{ ip: "10.0.0.0/8" }] (client IP range)
-# Route C: destinations=[{ port: 5432 }]  (destination port)
-
-# kongcheck treats A, B, and C as if they have no constraints.
-# Collision and shadowing analysis between stream routes and HTTP routes
-# will produce false positives.
-```
-
-If your control plane contains stream (TCP/TLS) routes alongside HTTP routes, filter them out with `--filter tag:<stream-tag>` or review them manually.
 
 ---
 

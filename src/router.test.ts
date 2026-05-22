@@ -10,14 +10,18 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+	cidrToRange,
 	classifyPath,
 	compareRoutes,
 	computeUpstreamUri,
 	extractMatchedPrefix,
+	ipPortListsOverlap,
+	ipsCanOverlap,
 	isRegexPath,
 	marshalRoute,
 	matchPath,
 	matchRoute,
+	parseIpv4,
 	sanitizeUriPostfix,
 	simulateRequest,
 	stripRegexPrefix,
@@ -40,6 +44,10 @@ function makeRoute(overrides: Partial<KongRoute> & { paths: string[] }): Marshal
 		created_at: overrides.created_at,
 		strip_path: overrides.strip_path,
 		service: overrides.service,
+		protocols: overrides.protocols,
+		snis: overrides.snis,
+		sources: overrides.sources,
+		destinations: overrides.destinations,
 	};
 	return marshalRoute(route, undefined, 'traditional');
 }
@@ -1172,8 +1180,7 @@ describe('matchRoute – wildcard host port handling', () => {
 	});
 });
 
-// ─── marshalRoute – subMatchWeight edge cases (Kong traditional.lua L333–L374) ──
-
+// marshalRoute – subMatchWeight edge cases (Kong traditional.lua L333–L374)
 describe('marshalRoute – subMatchWeight edge cases: mixed and multi-wildcard hosts', () => {
 	it('PLAIN_HOSTS_ONLY (bit 1) is NOT set when hosts array contains BOTH plain and wildcard entries', () => {
 		// Kong L368: "if not has_host_wildcard then submatch_weight |= PLAIN_HOSTS_ONLY"
@@ -1383,5 +1390,413 @@ describe('simulateRequest – explanation text for HAS_WILDCARD_HOST_PORT orderi
 			result.winner?.route.id,
 			'Wildcard-with-port (HAS_WILDCARD_HOST_PORT, subMatchWeight=4) must win over wildcard-without-port (subMatchWeight=0)',
 		).toBe('r-with-port');
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IPv4 / CIDR utilities (exported from router.ts)
+// Mirrors Kong's lua-resty-ipmatcher behaviour used in create_range_f.
+// Kong source: traditional.lua#L279-L284
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('parseIpv4 – converts dotted-decimal to 32-bit integer', () => {
+	it('parses 0.0.0.0 as 0', () => {
+		expect(parseIpv4('0.0.0.0'), '0.0.0.0 must equal integer 0').toBe(0);
+	});
+
+	it('parses 255.255.255.255 as 0xFFFFFFFF (4294967295)', () => {
+		expect(parseIpv4('255.255.255.255'), '255.255.255.255 is the all-ones address (max IPv4)').toBe(0xffffffff);
+	});
+
+	it('parses 10.0.0.1 correctly', () => {
+		// 10*2^24 + 0*2^16 + 0*2^8 + 1 = 167772161
+		expect(parseIpv4('10.0.0.1'), '10.0.0.1 = 0x0A000001 = 167772161').toBe(167772161);
+	});
+
+	it('parses 192.168.1.100 correctly', () => {
+		// 192*2^24 + 168*2^16 + 1*2^8 + 100
+		const expected = (192 << 24) + (168 << 16) + (1 << 8) + 100;
+		expect(parseIpv4('192.168.1.100'), '192.168.1.100 must be parsed to its 32-bit representation').toBe(
+			expected >>> 0,
+		);
+	});
+
+	it('returns null for an IPv6 address (not dotted-decimal)', () => {
+		expect(parseIpv4('::1'), 'IPv6 addresses must return null – CIDR utils only support IPv4').toBeNull();
+	});
+
+	it('returns null for a malformed address with too few octets', () => {
+		expect(parseIpv4('10.0.1'), 'Three-octet string is not a valid IPv4 address').toBeNull();
+	});
+
+	it('returns null for an octet out of range', () => {
+		expect(parseIpv4('10.0.0.256'), 'Octet 256 is out of [0,255] range').toBeNull();
+	});
+
+	it('returns null for an empty string', () => {
+		expect(parseIpv4(''), 'Empty string is not a valid IPv4 address').toBeNull();
+	});
+});
+
+describe('cidrToRange – CIDR notation to inclusive [lo, hi] range', () => {
+	it('parses 10.0.0.0/8 as the full 10.x.x.x range', () => {
+		const range = cidrToRange('10.0.0.0/8');
+		const lo = parseIpv4('10.0.0.0')!;
+		const hi = parseIpv4('10.255.255.255')!;
+		expect(range, '10.0.0.0/8 must produce a valid range').not.toBeNull();
+		expect(range![0], '10.0.0.0/8 lo must be 10.0.0.0').toBe(lo);
+		expect(range![1], '10.0.0.0/8 hi must be 10.255.255.255').toBe(hi);
+	});
+
+	it('parses 192.168.0.0/24 as the standard /24 range', () => {
+		const range = cidrToRange('192.168.0.0/24');
+		expect(range, '192.168.0.0/24 must produce a valid range').not.toBeNull();
+		expect(range![0], '192.168.0.0/24 lo must be 192.168.0.0').toBe(parseIpv4('192.168.0.0')!);
+		expect(range![1], '192.168.0.0/24 hi must be 192.168.0.255').toBe(parseIpv4('192.168.0.255')!);
+	});
+
+	it('parses /32 as a single-host range ([host, host])', () => {
+		const range = cidrToRange('10.1.2.3/32');
+		const host = parseIpv4('10.1.2.3')!;
+		expect(range, '10.1.2.3/32 must parse to a valid range').not.toBeNull();
+		expect(range![0], '/32 lo must equal the host address').toBe(host);
+		expect(range![1], '/32 hi must equal the host address (single-host range)').toBe(host);
+	});
+
+	it('parses /0 as the entire IPv4 address space', () => {
+		const range = cidrToRange('0.0.0.0/0');
+		expect(range, '0.0.0.0/0 must produce a valid range').not.toBeNull();
+		expect(range![0], '0.0.0.0/0 lo must be 0').toBe(0);
+		expect(range![1], '0.0.0.0/0 hi must be 0xFFFFFFFF').toBe(0xffffffff);
+	});
+
+	it('returns null for an IPv6 CIDR', () => {
+		expect(
+			cidrToRange('::1/128'),
+			'IPv6 CIDRs must return null – conservative: callers assume potential overlap',
+		).toBeNull();
+	});
+
+	it('returns null for a string without a slash', () => {
+		expect(cidrToRange('10.0.0.1'), 'A plain IP string without / must return null from cidrToRange').toBeNull();
+	});
+
+	it('returns null for prefix length > 32', () => {
+		expect(cidrToRange('10.0.0.0/33'), 'Prefix length 33 is out of range and must return null').toBeNull();
+	});
+});
+
+describe('ipsCanOverlap – checks whether two IP/CIDR constraints could match the same address', () => {
+	it('returns true for identical plain IPs', () => {
+		expect(ipsCanOverlap('10.0.0.1', '10.0.0.1'), 'Identical IPs always overlap').toBe(true);
+	});
+
+	it('returns false for two different plain IPs', () => {
+		expect(ipsCanOverlap('10.0.0.1', '10.0.0.2'), 'Different plain IPs never overlap').toBe(false);
+	});
+
+	it('returns true when a plain IP falls inside a CIDR', () => {
+		expect(ipsCanOverlap('10.0.0.5', '10.0.0.0/24'), '10.0.0.5 is inside 10.0.0.0/24').toBe(true);
+	});
+
+	it('returns false when a plain IP is outside a CIDR', () => {
+		expect(ipsCanOverlap('10.1.0.1', '10.0.0.0/24'), '10.1.0.1 is outside 10.0.0.0/24').toBe(false);
+	});
+
+	it('returns true for two overlapping CIDRs (supernet/subnet relationship)', () => {
+		expect(ipsCanOverlap('10.0.0.0/8', '10.1.0.0/16'), '10.1.0.0/16 is entirely within 10.0.0.0/8').toBe(true);
+	});
+
+	it('returns false for two non-overlapping CIDRs', () => {
+		expect(ipsCanOverlap('192.168.0.0/24', '192.168.1.0/24'), '192.168.0.x and 192.168.1.x are disjoint').toBe(false);
+	});
+
+	it('returns true (conservative) for an IPv6 address', () => {
+		expect(
+			ipsCanOverlap('::1', '10.0.0.1'),
+			'IPv6 addresses cannot be parsed as IPv4 – conservative overlap assumed',
+		).toBe(true);
+	});
+
+	it('returns true (conservative) for an IPv6 CIDR', () => {
+		expect(ipsCanOverlap('::1/128', '10.0.0.1'), 'IPv6 CIDRs cannot be parsed – conservative overlap assumed').toBe(
+			true,
+		);
+	});
+});
+
+describe('ipPortListsOverlap – OR-of-ANDs across entry pairs', () => {
+	it('returns true when both lists are empty (vacuously: no entries to be disjoint)', () => {
+		// Empty source list in Kong means "no constraint applied" which would never
+		// reach the matcher; but for safety verify the function is stable.
+		expect(ipPortListsOverlap([], []), 'Empty lists have no pairs to check – returns false (no overlap possible)').toBe(
+			false,
+		);
+	});
+
+	it('returns true when both lists have identical IP+port entries', () => {
+		const a = [{ ip: '10.0.0.1', port: 80 }];
+		const b = [{ ip: '10.0.0.1', port: 80 }];
+		expect(ipPortListsOverlap(a, b), 'Identical IP+port entries trivially overlap').toBe(true);
+	});
+
+	it('returns false when ports differ (port-disjoint entries)', () => {
+		const a = [{ ip: '10.0.0.1', port: 80 }];
+		const b = [{ ip: '10.0.0.1', port: 443 }];
+		expect(
+			ipPortListsOverlap(a, b),
+			'Same IP but different ports: no single connection can satisfy both → disjoint',
+		).toBe(false);
+	});
+
+	it('returns false when IPs are in disjoint CIDRs', () => {
+		const a = [{ ip: '10.0.0.0/24' }];
+		const b = [{ ip: '10.0.1.0/24' }];
+		expect(ipPortListsOverlap(a, b), '10.0.0.x/24 and 10.0.1.x/24 are disjoint address blocks').toBe(false);
+	});
+
+	it('returns true when one entry has no IP (wildcard) and other has an IP', () => {
+		const a = [{ port: 80 }]; // no IP → wildcard
+		const b = [{ ip: '10.0.0.1', port: 80 }];
+		expect(
+			ipPortListsOverlap(a, b),
+			'Wildcard IP (absent) on one side always overlaps with any specific IP on the other',
+		).toBe(true);
+	});
+
+	it('returns true when one entry has no port (wildcard) and other has a port', () => {
+		const a = [{ ip: '10.0.0.1' }]; // no port → wildcard
+		const b = [{ ip: '10.0.0.1', port: 80 }];
+		expect(
+			ipPortListsOverlap(a, b),
+			'Wildcard port (absent) on one side always overlaps with any specific port on the other',
+		).toBe(true);
+	});
+
+	it('returns true when any single pair across multi-entry lists can overlap', () => {
+		// listA entry 0 is disjoint with listB entry 0 (port mismatch)
+		// listA entry 1 overlaps with listB entry 0 (same IP, no port on either)
+		const a = [
+			{ ip: '10.0.0.1', port: 9000 },
+			{ ip: '10.0.0.1' }, // wildcard port
+		];
+		const b = [{ ip: '10.0.0.1', port: 80 }];
+		expect(
+			ipPortListsOverlap(a, b),
+			'At least one pair (entry 1 from A, entry 0 from B) can overlap → lists overlap',
+		).toBe(true);
+	});
+
+	it('returns false when ALL pairs across multi-entry lists are disjoint', () => {
+		// Both entries in listA use port 80; listB only has port 443 → all pairs disjoint on port.
+		const a = [
+			{ ip: '10.0.0.1', port: 80 },
+			{ ip: '10.0.0.2', port: 80 },
+		];
+		const b = [{ ip: '10.0.0.1', port: 443 }];
+		expect(ipPortListsOverlap(a, b), 'All pairs have differing ports (80 vs 443) → all disjoint → no overlap').toBe(
+			false,
+		);
+	});
+});
+
+describe('matchRoute – SNI constraint (stream-route explicit simulation mode)', () => {
+	it('matches when request.sni is undefined (static-analysis mode: SNI check skipped)', () => {
+		const r = makeRoute({
+			id: 'r-sni',
+			paths: ['/tcp'],
+			snis: ['api.example.com'],
+		});
+		// No sni on request → conservative, treat as matching
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp' }),
+			'When request.sni is undefined the SNI check is skipped (static-analysis mode)',
+		).toBe(true);
+	});
+
+	it('matches when request.sni is in the route SNI set', () => {
+		const r = makeRoute({
+			id: 'r-sni',
+			paths: ['/tcp'],
+			snis: ['api.example.com', 'admin.example.com'],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sni: 'api.example.com' }),
+			'request.sni matching a value in route.snis must produce a match',
+		).toBe(true);
+	});
+
+	it('does not match when request.sni is absent from the route SNI set', () => {
+		const r = makeRoute({
+			id: 'r-sni',
+			paths: ['/tcp'],
+			snis: ['api.example.com'],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sni: 'other.example.com' }),
+			'request.sni not in route.snis must fail the SNI constraint',
+		).toBe(false);
+	});
+
+	it('strips trailing dot from FQDN SNI before comparing (Kong normalisation)', () => {
+		// Kong strips the trailing dot in marshall_route: traditional.lua#L511-L513
+		const r = makeRoute({
+			id: 'r-sni-fqdn',
+			paths: ['/tcp'],
+			snis: ['api.example.com.'], // trailing dot in route config
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sni: 'api.example.com' }),
+			'Trailing dot in route SNI FQDN must be stripped before comparison – should match',
+		).toBe(true);
+	});
+
+	it('matches any SNI when route has no snis list', () => {
+		const r = makeRoute({
+			id: 'r-no-sni',
+			paths: ['/tcp'],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sni: 'anything.example.com' }),
+			'A route with no snis constraint matches any SNI value',
+		).toBe(true);
+	});
+});
+
+describe('matchRoute – source IP/port constraint', () => {
+	it('matches when request.sourceIp is undefined (static-analysis mode: source check skipped)', () => {
+		const r = makeRoute({
+			id: 'r-src',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.1', port: 80 }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp' }),
+			'When request.sourceIp is undefined the source constraint is skipped',
+		).toBe(true);
+	});
+
+	it('matches on exact IP match with no port constraint on the entry', () => {
+		const r = makeRoute({
+			id: 'r-src',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.5' }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '10.0.0.5' }),
+			'Exact IP match with no port constraint on route must succeed',
+		).toBe(true);
+	});
+
+	it('matches when source IP is inside a CIDR range', () => {
+		const r = makeRoute({
+			id: 'r-src-cidr',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.0/8' }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '10.5.6.7' }),
+			'Source IP 10.5.6.7 must match CIDR 10.0.0.0/8',
+		).toBe(true);
+	});
+
+	it('does not match when source IP is outside the CIDR range', () => {
+		const r = makeRoute({
+			id: 'r-src-cidr',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.0/24' }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '10.0.1.1' }),
+			'Source IP 10.0.1.1 is outside 10.0.0.0/24 and must not match',
+		).toBe(false);
+	});
+
+	it('matches when both IP and port satisfy the entry constraint', () => {
+		const r = makeRoute({
+			id: 'r-src-ip-port',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.1', port: 1234 }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '10.0.0.1', sourcePort: 1234 }),
+			'Matching IP and matching port must satisfy the IP+port entry',
+		).toBe(true);
+	});
+
+	it('does not match when IP matches but port differs', () => {
+		const r = makeRoute({
+			id: 'r-src-ip-port',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.1', port: 1234 }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '10.0.0.1', sourcePort: 9999 }),
+			'Port mismatch (1234 vs 9999) must fail the source constraint',
+		).toBe(false);
+	});
+
+	it('matches on wildcard entry (no ip, no port in entry) with any source', () => {
+		// Kong: when entry has no ip and no port both ip_ok and port check pass immediately.
+		const r = makeRoute({
+			id: 'r-src-wildcard',
+			paths: ['/tcp'],
+			sources: [{}], // wildcard entry
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '1.2.3.4', sourcePort: 9999 }),
+			'A source entry with no IP and no port constraint matches any source',
+		).toBe(true);
+	});
+
+	it('matches when any entry in a multi-entry list satisfies the source (OR semantics)', () => {
+		const r = makeRoute({
+			id: 'r-src-multi',
+			paths: ['/tcp'],
+			sources: [{ ip: '10.0.0.1', port: 80 }, { ip: '192.168.0.0/16' }],
+		});
+		// Second entry (CIDR, no port) must match 192.168.5.5
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', sourceIp: '192.168.5.5' }),
+			'192.168.5.5 matches the CIDR entry 192.168.0.0/16 (OR semantics across source entries)',
+		).toBe(true);
+	});
+});
+
+describe('matchRoute – destination IP/port constraint', () => {
+	it('matches when request.destIp is undefined (static-analysis mode)', () => {
+		const r = makeRoute({
+			id: 'r-dst',
+			paths: ['/tcp'],
+			destinations: [{ ip: '172.16.0.1', port: 443 }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp' }),
+			'When request.destIp is undefined the destination constraint is skipped',
+		).toBe(true);
+	});
+
+	it('matches when destination IP+port satisfy the entry', () => {
+		const r = makeRoute({
+			id: 'r-dst',
+			paths: ['/tcp'],
+			destinations: [{ ip: '172.16.0.1', port: 443 }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', destIp: '172.16.0.1', destPort: 443 }),
+			'Matching dest IP and port must satisfy the destination entry',
+		).toBe(true);
+	});
+
+	it('does not match when destination IP is outside the constraint', () => {
+		const r = makeRoute({
+			id: 'r-dst-cidr',
+			paths: ['/tcp'],
+			destinations: [{ ip: '172.16.0.0/24', port: 443 }],
+		});
+		expect(
+			matchRoute(r, { method: 'GET', host: 'example.com', path: '/tcp', destIp: '172.16.1.5', destPort: 443 }),
+			'172.16.1.5 is outside 172.16.0.0/24 and must not match the destination constraint',
+		).toBe(false);
 	});
 });

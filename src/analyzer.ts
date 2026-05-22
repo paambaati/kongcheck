@@ -23,7 +23,7 @@
  * @see src/router.ts – compareRoutes, simulateRequest
  */
 
-import { compareRoutes, marshalRoute, matchPath, simulateRequest } from './router.ts';
+import { compareRoutes, ipPortListsOverlap, marshalRoute, matchPath, simulateRequest } from './router.ts';
 import type { Finding, KonnectData, MarshalledRoute, RouterFlavor, Severity, SimRequest } from './types.ts';
 
 /**
@@ -516,6 +516,17 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 			}
 			seenPairs.add(pairKey);
 
+			// L4 stratification: SNI/source IP/dest IP/protocol-disjoint pairs.
+			// If two routes can never receive the same connection because they differ
+			// on a network-layer attribute, emit an INFO notice and skip the collision
+			// finding. Checked before haveIdenticalPaths so it applies to all path
+			// configurations, not just identical-path pairs.
+			const sniIpStrat = isSniIpStratified(winner, loser);
+			if (sniIpStrat !== false) {
+				if (includeInfo) findings.push(buildSniIpStratifiedFinding(winner, loser, req.path, flavor, sniIpStrat.reason));
+				continue;
+			}
+
 			// INFO/MEDIUM: identical-path, header-stratified pair.
 			// 'stratified' → Kong partitions traffic correctly; emit INFO notice.
 			// 'regex-opaque' → cannot determine disjointness statically; emit MEDIUM
@@ -653,6 +664,173 @@ function isHeaderStratified(winner: MarshalledRoute, loser: MarshalledRoute): 's
 
 	if (foundRegexHeader) return 'regex-opaque';
 	return false;
+}
+
+/**
+ * HTTP-family protocols handled by Kong's HTTP subsystem.
+ * Routes whose `protocols` set is entirely within this family cannot receive
+ * TCP/TLS/UDP stream connections.
+ *
+ * Kong source: `traditional.lua` – `SORTED_MATCH_RULES` (is_http branch)
+ *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L194-L200
+ */
+const HTTP_PROTOCOLS = new Set(['http', 'https', 'grpc', 'grpcs']);
+
+/**
+ * Stream-family protocols handled by Kong's stream subsystem.
+ * Routes whose `protocols` set is entirely within this family cannot receive
+ * HTTP connections.
+ *
+ * Kong source: `traditional.lua` – `SORTED_MATCH_RULES` (stream branch)
+ *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L201-L206
+ */
+const STREAM_PROTOCOLS = new Set(['tcp', 'tls', 'udp', 'tls_passthrough']);
+
+/**
+ * Returns `true` when the two protocol lists are mutually exclusive — one list
+ * is entirely HTTP-family and the other is entirely stream-family. In that
+ * case Kong would never route the same connection to both routes.
+ *
+ * @param a - `protocols` array from route A.
+ * @param b - `protocols` array from route B.
+ */
+function protocolsAreDisjoint(a: string[], b: string[]): boolean {
+	const aLower = a.map((p) => p.toLowerCase());
+	const bLower = b.map((p) => p.toLowerCase());
+	const aIsHttp = aLower.every((p) => HTTP_PROTOCOLS.has(p));
+	const bIsStream = bLower.every((p) => STREAM_PROTOCOLS.has(p));
+	if (aIsHttp && bIsStream) return true;
+	const bIsHttp = bLower.every((p) => HTTP_PROTOCOLS.has(p));
+	const aIsStream = aLower.every((p) => STREAM_PROTOCOLS.has(p));
+	return bIsHttp && aIsStream;
+}
+
+/**
+ * Result type returned by {@link isSniIpStratified}: either a stratified
+ * finding with a human-readable reason, or `false` (not stratified on any
+ * L4 dimension).
+ */
+type SniIpStratification = { stratified: true; reason: string } | false;
+
+/**
+ * Checks whether two routes are mutually exclusive on any L4 dimension —
+ * protocol family, SNI, source IP/port, or destination IP/port.
+ *
+ * Returns a {@link SniIpStratification} with a human-readable reason when the
+ * routes are stratified; returns `false` when no L4 stratification can be
+ * determined statically.
+ *
+ * Dimension checks (in order):
+ * 1. **Protocol family** — one route is all-HTTP, the other all-stream.
+ * 2. **SNI** — both routes have non-empty `snis` sets and the sets are
+ *    completely disjoint (no shared SNI value).
+ * 3. **Source IP/port** — both routes have non-empty `sources` lists and
+ *    {@link ipPortListsOverlap} returns `false`.
+ * 4. **Destination IP/port** — both routes have non-empty `destinations`
+ *    lists and {@link ipPortListsOverlap} returns `false`.
+ *
+ * **Conservative by design**: when a constraint list is absent on one route
+ * (meaning "match anything"), that dimension is NOT flagged as stratified —
+ * the absent constraint side could receive any connection and would potentially
+ * overlap with the other route.
+ *
+ * Kong sources:
+ * - SNI normalisation (trailing-dot strip): traditional.lua#L511-L513
+ * - MATCH_RULES.SNI: traditional.lua#L1072-L1077
+ * - matcher_src_dst: traditional.lua#L880-L900
+ */
+function isSniIpStratified(a: MarshalledRoute, b: MarshalledRoute): SniIpStratification {
+	// 1. Protocol-family disjointness.
+	const aProtos = a.route.protocols;
+	const bProtos = b.route.protocols;
+	if (aProtos && aProtos.length > 0 && bProtos && bProtos.length > 0) {
+		if (protocolsAreDisjoint(aProtos, bProtos)) {
+			return {
+				stratified: true,
+				reason: `routes use mutually exclusive protocol families (${aProtos.join(', ')} vs ${bProtos.join(', ')})`,
+			};
+		}
+	}
+
+	// 2. SNI disjointness.
+	// Both routes must have a non-empty snis list; otherwise the absent side is
+	// a wildcard (matches all SNIs) and cannot be disjoint from any other set.
+	// Kong strips trailing dots from FQDNs before indexing (traditional.lua#L511-L513).
+	const aSnis = a.route.snis;
+	const bSnis = b.route.snis;
+	if (aSnis && aSnis.length > 0 && bSnis && bSnis.length > 0) {
+		const aNorm = new Set(aSnis.map((s) => (s.endsWith('.') ? s.slice(0, -1) : s)));
+		const bNorm = new Set(bSnis.map((s) => (s.endsWith('.') ? s.slice(0, -1) : s)));
+		const hasOverlap = [...aNorm].some((s) => bNorm.has(s));
+		if (!hasOverlap) {
+			return {
+				stratified: true,
+				reason: `routes have disjoint SNI sets ([${[...aNorm].join(', ')}] vs [${[...bNorm].join(', ')}])`,
+			};
+		}
+	}
+
+	// 3. Source IP/port disjointness.
+	const aSrcs = a.route.sources;
+	const bSrcs = b.route.sources;
+	if (aSrcs && aSrcs.length > 0 && bSrcs && bSrcs.length > 0) {
+		if (!ipPortListsOverlap(aSrcs, bSrcs)) {
+			return {
+				stratified: true,
+				reason: 'routes have non-overlapping source IP/port constraints',
+			};
+		}
+	}
+
+	// 4. Destination IP/port disjointness.
+	const aDsts = a.route.destinations;
+	const bDsts = b.route.destinations;
+	if (aDsts && aDsts.length > 0 && bDsts && bDsts.length > 0) {
+		if (!ipPortListsOverlap(aDsts, bDsts)) {
+			return {
+				stratified: true,
+				reason: 'routes have non-overlapping destination IP/port constraints',
+			};
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Builds an INFO-level finding for a route pair that is correctly stratified
+ * by L4 constraints (SNI, source/destination IP/port, or protocol family).
+ *
+ * The finding explains which L4 attribute distinguishes the two routes and
+ * confirms that no misrouting occurs.
+ */
+function buildSniIpStratifiedFinding(
+	winner: MarshalledRoute,
+	loser: MarshalledRoute,
+	samplePath: string,
+	flavor: RouterFlavor,
+	reason: string,
+): Finding {
+	const winName = winner.route.name ?? winner.route.id;
+	const loseName = loser.route.name ?? loser.route.id;
+	const paths = (winner.route.paths ?? []).join(', ') || samplePath;
+
+	return {
+		severity: 'INFO',
+		type: 'collision',
+		routerFlavor: flavor,
+		routes: [winner.route, loser.route],
+		samples: [samplePath],
+		winnerId: winner.route.id,
+		reason: [
+			`Routes "${winName}" and "${loseName}" share overlapping path(s) but are correctly stratified by L4 constraints.`,
+			`Path(s): ${paths}`,
+			`Stratification: ${reason}.`,
+			'Kong routes each connection to the correct route based on L4 attributes. No misrouting occurs.',
+			'Confirm this L4 stratification is intentional.',
+		],
+		suggestions: [],
+	};
 }
 
 /**
@@ -940,6 +1118,14 @@ function detectSiblingOverlaps(
 
 			// Skip: winner has {variable} template placeholders (PCRE literals, not wildcards).
 			if (winner.parsedPaths.some((p) => p.kind === 'regex' && /\{[^}]+\}/.test(p.regexSource ?? ''))) continue;
+
+			// L4 stratification: SNI/source IP/dest IP/protocol-disjoint pairs.
+			// Same logic as in detectCollisions — checked before haveIdenticalPaths.
+			const sniIpStrat = isSniIpStratified(winner, loser);
+			if (sniIpStrat !== false) {
+				if (includeInfo) findings.push(buildSniIpStratifiedFinding(winner, loser, overlap, flavor, sniIpStrat.reason));
+				continue;
+			}
 
 			// INFO/MEDIUM: identical-path, header-stratified pair. Same logic as detectCollisions.
 			if (haveIdenticalPaths(winner, loser)) {

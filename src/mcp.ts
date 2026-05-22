@@ -25,6 +25,7 @@ import { fetchKonnectConfig } from './client.ts';
 import { applyFindingFilter, parseFilters, type FilterKey } from './filter.ts';
 import { compareRoutes, marshalRoute, simulateRequest } from './router.ts';
 import type { KonnectData, KonnectConfig, RouterFlavor } from './types.ts';
+import { normalizePath } from './utils.ts';
 
 /** Fields common to every tool that needs a live Konnect connection. */
 const konnectParams = {
@@ -152,8 +153,8 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 				'kongcheck audits Kong Konnect route configurations for collisions, ' +
 				'shadowing, and suspicious regex patterns. Use analyze_routes for a full ' +
 				'audit, get_collisions for a focused collision report, explain_request to ' +
-				'simulate a specific HTTP request, and get_route_config to inspect the raw ' +
-				'route/service data.',
+				'simulate a specific HTTP or TCP/TLS stream request, and get_route_config ' +
+				'to inspect the raw route/service data.',
 		},
 	);
 
@@ -170,7 +171,12 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 					.boolean()
 					.optional()
 					.default(false)
-					.describe('Include INFO-level universal-matcher findings. Default: false.'),
+					.describe(
+						'Include INFO-level findings. INFO covers: universal catch-all routes that ' +
+							'match every request, and route pairs that are structurally stratified ' +
+							'(mutually exclusive by SNI, source/destination IP, or protocol family) ' +
+							'so a collision is impossible. Default: false.',
+					),
 				filter: filterParam,
 			},
 		},
@@ -255,21 +261,89 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 		'explain_request',
 		{
 			description:
-				'Simulate a specific HTTP request against a Konnect control plane and return ' +
-				'the winning route with a step-by-step explanation of why it won.',
+				'Simulate a specific HTTP or TCP/TLS stream request against a Konnect control ' +
+				'plane and return the winning route with a step-by-step explanation of why it won. ' +
+				'For stream routes, supply sni / sourceIp / sourcePort / destIp / destPort as needed. ' +
+				'When an L4 field is omitted, the corresponding route constraint is skipped ' +
+				'(conservative mode: every route is a candidate). ' +
+				'The path is normalised before matching: query strings and fragments are stripped ' +
+				'and dot-segments are resolved.',
 			inputSchema: {
 				...konnectParams,
 				flavor: flavorParam,
 				method: z.string().default('GET').describe('HTTP method, e.g. "GET".'),
-				host: z.string().describe('Host header value, e.g. "api.example.com".'),
-				path: z.string().describe('Request path, e.g. "/api/v1/users".'),
+				host: z
+					.string()
+					.optional()
+					.describe(
+						'Host header value, e.g. "api.example.com". ' +
+							'Defaults to "example.com" when omitted (sufficient for path-only matching).',
+					),
+				path: z
+					.string()
+					.describe('Request path, e.g. "/api/v1/users". Query strings and fragments are stripped automatically.'),
 				headers: z
 					.record(z.string(), z.string())
 					.optional()
-					.describe('Optional request headers as a key/value object, e.g. {"x-env": "prod"}.'),
+					.describe(
+						'Optional request headers as a key/value object, e.g. {"x-env": "prod"}. ' +
+							'When provided, routes with header constraints are evaluated strictly. ' +
+							'When omitted, header constraints are skipped (every route is a candidate).',
+					),
+				sni: z
+					.string()
+					.optional()
+					.describe(
+						'TLS SNI value for stream route simulation, e.g. "api.example.com". ' +
+							'When provided, routes with snis constraints are evaluated strictly.',
+					),
+				sourceIp: z
+					.string()
+					.optional()
+					.describe(
+						'Source IP address of the connection, e.g. "10.0.1.5". IPv4 and IPv6 are ' +
+							'accepted; CIDR matching applies to the route constraints. When provided, ' +
+							'sources constraints on routes are evaluated strictly.',
+					),
+				sourcePort: z
+					.number()
+					.int()
+					.min(1)
+					.max(65535)
+					.optional()
+					.describe(
+						'Source TCP/UDP port of the connection, e.g. 54321. Evaluated only when sourceIp is also provided.',
+					),
+				destIp: z
+					.string()
+					.optional()
+					.describe(
+						'Destination IP address of the connection, e.g. "192.168.1.10". When provided, ' +
+							'destinations constraints on routes are evaluated strictly.',
+					),
+				destPort: z
+					.number()
+					.int()
+					.min(1)
+					.max(65535)
+					.optional()
+					.describe('Destination TCP/UDP port, e.g. 443. Evaluated only when destIp is also provided.'),
 			},
 		},
-		async ({ controlPlaneId, region, flavor, method, host, path, headers }) => {
+		async ({
+			controlPlaneId,
+			region,
+			flavor,
+			method,
+			host,
+			path,
+			headers,
+			sni,
+			sourceIp,
+			sourcePort,
+			destIp,
+			destPort,
+		}) => {
 			const cfg = resolveConfig({ controlPlaneId, region });
 			const fetched = await fetch(cfg);
 			const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
@@ -288,11 +362,23 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			}
 			const sorted = [...marshalled].sort(compareRoutes);
 
+			// Normalise the path: strip query strings, fragments, and resolve dot-segments.
+			const normalizedPath = normalizePath(path);
+
 			const result = simulateRequest(sorted, {
 				method,
-				host,
-				path,
+				host: host ?? 'example.com',
+				path: normalizedPath,
+				// When headers is provided (even empty object), header constraints are
+				// evaluated strictly. When undefined, they are skipped.
 				headers: headers as Record<string, string> | undefined,
+				// L4 fields: only applied when the caller provides them.
+				// Undefined = skip the check (conservative / static-analysis mode).
+				sni,
+				sourceIp,
+				sourcePort,
+				destIp,
+				destPort,
 			});
 
 			return {
@@ -304,6 +390,7 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 								controlPlaneId: cfg.controlPlaneId,
 								routerFlavor: resolvedFlavor,
 								request: result.request,
+								pathNormalized: normalizedPath !== path ? normalizedPath : undefined,
 								matched: !!result.winner,
 								winner: result.winner
 									? {

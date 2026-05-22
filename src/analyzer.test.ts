@@ -1225,3 +1225,281 @@ describe('analyzeRoutes – wildcard-with-port vs wildcard-without-port is corre
 		).toBe('r-ported');
 	});
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SNI / source IP / destination IP / protocol-family stratification
+// Kong source: traditional.lua#L1072-L1085, #L880-L900
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('analyzeRoutes – SNI stratification (INFO, not HIGH/MEDIUM)', () => {
+	it('emits INFO (not HIGH) when two routes share paths but have fully disjoint SNI sets', () => {
+		// Two stream routes targeting different services, same path, but non-overlapping SNIs.
+		// Kong routes each TLS connection to the correct route by SNI → no misrouting.
+		const config = makeConfig([
+			route('r-sni-a', 'sni-route-a', ['/stream'], {
+				service: { id: 'svc-a' },
+				snis: ['a.example.com'],
+			}),
+			route('r-sni-b', 'sni-route-b', ['/stream'], {
+				service: { id: 'svc-b' },
+				snis: ['b.example.com'],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highOrMedium = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && (f.severity === 'HIGH' || f.severity === 'MEDIUM'),
+		);
+		expect(
+			highOrMedium.length,
+			'Disjoint SNI sets fully stratify traffic – must produce zero HIGH or MEDIUM collision findings',
+		).toBe(0);
+
+		const infoFindings = findings.filter((f) => f.type === 'collision' && f.severity === 'INFO');
+		expect(
+			infoFindings.length,
+			'Disjoint SNI sets must produce an INFO finding so operators can confirm the stratification is intentional',
+		).toBeGreaterThan(0);
+	});
+
+	it('does NOT emit an INFO finding when includeInfo is false', () => {
+		const config = makeConfig([
+			route('r-sni-a', 'sni-route-a', ['/stream'], { service: { id: 'svc-a' }, snis: ['a.example.com'] }),
+			route('r-sni-b', 'sni-route-b', ['/stream'], { service: { id: 'svc-b' }, snis: ['b.example.com'] }),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: false });
+		const anyFinding = findings.filter((f) => f.type === 'collision' || f.type === 'shadowing');
+		expect(anyFinding.length, 'When includeInfo=false no collision/stratification findings must be emitted').toBe(0);
+	});
+
+	it('still emits a HIGH finding when SNI sets overlap (shared SNI value)', () => {
+		// Both routes accept 'shared.example.com' → Kong cannot differentiate them on SNI alone.
+		const config = makeConfig([
+			route('r-sni-x', 'sni-route-x', ['/stream'], {
+				service: { id: 'svc-x' },
+				snis: ['shared.example.com', 'x.example.com'],
+			}),
+			route('r-sni-y', 'sni-route-y', ['/stream'], {
+				service: { id: 'svc-y' },
+				snis: ['shared.example.com', 'y.example.com'],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highFindings = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && f.severity === 'HIGH',
+		);
+		expect(
+			highFindings.length,
+			'Overlapping SNI sets mean a connection to shared.example.com is ambiguous – must emit HIGH',
+		).toBeGreaterThan(0);
+	});
+
+	it('handles FQDN trailing-dot normalisation: snis ["api.example.com."] and ["api.example.com"] are the SAME SNI', () => {
+		// Kong strips trailing dots in marshall_route. If route A has "api.example.com." and
+		// route B has "api.example.com", they resolve to the same SNI → NOT stratified.
+		const config = makeConfig([
+			route('r-dot', 'route-fqdn-dot', ['/stream'], {
+				service: { id: 'svc-dot' },
+				snis: ['api.example.com.'],
+			}),
+			route('r-nodot', 'route-no-dot', ['/stream'], {
+				service: { id: 'svc-nodot' },
+				snis: ['api.example.com'],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		// After normalisation both SNIs are "api.example.com" → overlap → must NOT be INFO-stratified.
+		const infoStratified = findings.filter(
+			(f) => f.severity === 'INFO' && f.type === 'collision' && f.routes.some((r) => r.id === 'r-dot'),
+		);
+		expect(
+			infoStratified.length,
+			'After trailing-dot normalisation the SNIs are identical → not stratified → must produce no INFO stratification',
+		).toBe(0);
+	});
+});
+
+describe('analyzeRoutes – source IP/port stratification (INFO, not HIGH/MEDIUM)', () => {
+	it('emits INFO when two routes have non-overlapping source CIDR constraints', () => {
+		const config = makeConfig([
+			route('r-src-a', 'src-route-a', ['/tcp'], {
+				service: { id: 'svc-a' },
+				sources: [{ ip: '10.0.0.0/24' }],
+			}),
+			route('r-src-b', 'src-route-b', ['/tcp'], {
+				service: { id: 'svc-b' },
+				sources: [{ ip: '10.0.1.0/24' }],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highOrMedium = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && (f.severity === 'HIGH' || f.severity === 'MEDIUM'),
+		);
+		expect(
+			highOrMedium.length,
+			'Non-overlapping source CIDRs (10.0.0.x vs 10.0.1.x) fully stratify traffic → zero HIGH/MEDIUM',
+		).toBe(0);
+
+		const infoFindings = findings.filter((f) => f.type === 'collision' && f.severity === 'INFO');
+		expect(
+			infoFindings.length,
+			'Non-overlapping source CIDRs must produce an INFO stratification finding',
+		).toBeGreaterThan(0);
+	});
+
+	it('emits HIGH when source CIDRs overlap (supernet/subnet)', () => {
+		const config = makeConfig([
+			route('r-src-broad', 'src-broad', ['/tcp'], {
+				service: { id: 'svc-broad' },
+				sources: [{ ip: '10.0.0.0/8' }], // broader range
+			}),
+			route('r-src-narrow', 'src-narrow', ['/tcp'], {
+				service: { id: 'svc-narrow' },
+				sources: [{ ip: '10.1.0.0/16' }], // inside broad range
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highFindings = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && f.severity === 'HIGH',
+		);
+		expect(
+			highFindings.length,
+			'10.1.0.0/16 is inside 10.0.0.0/8 → source ranges overlap → must emit HIGH collision',
+		).toBeGreaterThan(0);
+	});
+
+	it('emits INFO when source port constraints are disjoint', () => {
+		const config = makeConfig([
+			route('r-port-80', 'route-port-80', ['/tcp'], {
+				service: { id: 'svc-80' },
+				sources: [{ port: 80 }],
+			}),
+			route('r-port-443', 'route-port-443', ['/tcp'], {
+				service: { id: 'svc-443' },
+				sources: [{ port: 443 }],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highOrMedium = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && (f.severity === 'HIGH' || f.severity === 'MEDIUM'),
+		);
+		expect(highOrMedium.length, 'Disjoint source ports (80 vs 443) fully stratify traffic → zero HIGH/MEDIUM').toBe(0);
+	});
+});
+
+describe('analyzeRoutes – destination IP/port stratification (INFO, not HIGH/MEDIUM)', () => {
+	it('emits INFO when destination IP constraints are non-overlapping', () => {
+		const config = makeConfig([
+			route('r-dst-a', 'dst-route-a', ['/tcp'], {
+				service: { id: 'svc-a' },
+				destinations: [{ ip: '192.168.0.0/24' }],
+			}),
+			route('r-dst-b', 'dst-route-b', ['/tcp'], {
+				service: { id: 'svc-b' },
+				destinations: [{ ip: '192.168.1.0/24' }],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highOrMedium = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && (f.severity === 'HIGH' || f.severity === 'MEDIUM'),
+		);
+		expect(highOrMedium.length, 'Non-overlapping destination CIDRs fully stratify traffic → zero HIGH/MEDIUM').toBe(0);
+
+		const infoFindings = findings.filter((f) => f.type === 'collision' && f.severity === 'INFO');
+		expect(
+			infoFindings.length,
+			'Non-overlapping destination CIDRs must produce an INFO stratification finding',
+		).toBeGreaterThan(0);
+	});
+});
+
+describe('analyzeRoutes – protocol-family stratification (INFO, not HIGH/MEDIUM)', () => {
+	it('emits INFO when one route is all-HTTP and the other is all-stream', () => {
+		const config = makeConfig([
+			route('r-http', 'http-route', ['/api'], {
+				service: { id: 'svc-http' },
+				protocols: ['http', 'https'],
+			}),
+			route('r-tcp', 'tcp-route', ['/api'], {
+				service: { id: 'svc-tcp' },
+				protocols: ['tcp', 'tls'],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highOrMedium = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && (f.severity === 'HIGH' || f.severity === 'MEDIUM'),
+		);
+		expect(
+			highOrMedium.length,
+			'HTTP protocols (http/https) and stream protocols (tcp/tls) are mutually exclusive → zero HIGH/MEDIUM',
+		).toBe(0);
+
+		const infoFindings = findings.filter((f) => f.type === 'collision' && f.severity === 'INFO');
+		expect(
+			infoFindings.length,
+			'Disjoint protocol families must produce an INFO stratification finding',
+		).toBeGreaterThan(0);
+	});
+
+	it('emits HIGH when both routes have overlapping protocol sets (both http+https)', () => {
+		const config = makeConfig([
+			route('r-http-a', 'http-a', ['/api'], {
+				service: { id: 'svc-a' },
+				protocols: ['http', 'https'],
+			}),
+			route('r-http-b', 'http-b', ['/api'], {
+				service: { id: 'svc-b' },
+				protocols: ['http', 'https'],
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		const highFindings = findings.filter(
+			(f) => (f.type === 'collision' || f.type === 'shadowing') && f.severity === 'HIGH',
+		);
+		expect(
+			highFindings.length,
+			'Identical protocol sets on same-path, different-service routes must emit HIGH',
+		).toBeGreaterThan(0);
+	});
+});
+
+describe('analyzeRoutes – L4 stratification is not triggered when only one route has the constraint', () => {
+	it('emits HIGH (not INFO) when only one route has snis and the other has none', () => {
+		// Route B has no snis → it acts as a wildcard (matches all SNIs).
+		// Route A has specific snis. They can both match a connection for A's SNIs.
+		const config = makeConfig([
+			route('r-sni', 'constrained', ['/stream'], {
+				service: { id: 'svc-sni' },
+				snis: ['api.example.com'],
+			}),
+			route('r-open', 'open', ['/stream'], {
+				service: { id: 'svc-open' },
+				// no snis → matches all SNIs
+			}),
+		]);
+
+		const findings = analyzeRoutes(config, { includeInfo: true });
+		// The open route (no SNI constraint) can receive the same connection as the constrained route.
+		// This is a real collision risk, not stratification.
+		const collisionFindings = findings.filter((f) => f.type === 'collision' || f.type === 'shadowing');
+		expect(
+			collisionFindings.length,
+			'When one route has no SNI constraint it acts as a wildcard → real collision risk → must produce a finding',
+		).toBeGreaterThan(0);
+
+		const infoOnly = collisionFindings.every((f) => f.severity === 'INFO');
+		expect(
+			infoOnly,
+			'At least one finding must be HIGH or MEDIUM since the unconstrained route can intercept all SNIs',
+		).toBe(false);
+	});
+});

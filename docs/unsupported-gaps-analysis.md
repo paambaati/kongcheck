@@ -207,37 +207,49 @@ The finding is intentionally conservative. Suppressing it would require proving 
 
 ---
 
-## 6. URI normalization and query-string stripping
+## 6. ~~URI normalization and query-string stripping~~ ✓ Done
 
-### What is missing
+### What was missing
 
 Before matching, Kong applies several normalizations to the incoming request URI:
 
 1. Strips the query string (`?` and everything after).
-2. Percent-decodes path segments (or normalizes encoding).
+2. Strips the URL fragment (`#` and everything after).
 3. Resolves `.` and `..` segments.
 
-`kongcheck` takes the path as supplied by `--path` and does no normalization. A user who passes `--path /api/v1?debug=1` will get a prefix-match result that includes `?debug=1` in the tested string, potentially causing a false "no winner" result even though Kong would strip the query string first.
+`kongcheck` took the path as supplied by `--path` and applied no normalization. A user who passed `--path /api/v1?debug=1` would get a prefix-match result that included `?debug=1` in the tested string, potentially causing a false "no winner" result even though Kong would strip the query string first.
 
 The practical surface is `explain-request`. The static collision analysis uses `generateCandidateRequests` to synthesize paths — these are always clean (no query strings), so normalization gaps do not affect collision detection.
 
-### Implementation complexity — **Low**
+### Implementation
 
-Stripping the query string is a one-liner (`path.split('?')[0]`). Percent-decoding and dotpath resolution add perhaps 10–15 lines. Applying these normalizations at the `explain-request` ingestion point (before path matching) fully closes the gap.
+`normalizePath(rawPath: string): string` added to `src/cli.ts` (exported for testing).
 
-A warning could also be emitted to `stderr` when the user passes a path containing `?`, `%`, or dotpath segments.
+Uses the WHATWG `URL` parser with a throwaway base (`http://x`). `url.pathname` is dot-resolved and never includes `?` or `#`. Falls back to the raw input if parsing fails (no silent data loss).
 
-### Usefulness — **Low**
+Percent-encoding is intentionally **preserved**: Kong's traditional router matches the raw URI without decoding, so `/hello%20world` and `/hello world` are distinct paths.
 
-This only matters if a user accidentally passes a query string or percent-encoded path to `--path`. The README documents "always pass a clean path (no query string)". In practice, developers copy-paste clean path segments rather than full URLs. This is a quality-of-life fix rather than a correctness fix.
+When `normalizePath` changes the value, a warning is printed to `stderr`:
 
-### Testability — **Easy**
+```
+Warning: --path was normalized from '/api/v1?debug=1' to '/api/v1'.
+```
 
-Unit tests for the normalization function. Integration tests for `explain-request` asserting that `--path /api/v1?debug=1` gives the same result as `--path /api/v1`.
+Tests: `src/cli.test.ts` — `normalizePath` suite (query-string stripping, fragment stripping, percent-encoding preservation, dot-segment resolution, clean-path passthrough, edge cases).
+
+### Implementation complexity — **Low** ✓ Done
+
+### Usefulness — **Low** ✓ Done
+
+This only matters if a user accidentally passes a query string or a dotpath to `--path`. The README documents "always pass a clean path (no query string)". In practice, developers copy-paste clean path segments rather than full URLs. This is a quality-of-life fix rather than a correctness fix.
+
+### Testability — **Easy** ✓ Done
+
+Unit tests for the normalization function in `src/cli.test.ts`.
 
 ### Realism — **Rare**
 
-Most users follow the documented guidance. A copy-paste from a browser address bar is the most likely trigger. Low priority.
+Most users follow the documented guidance. A copy-paste from a browser address bar is the most likely trigger.
 
 ---
 
@@ -285,45 +297,50 @@ Catastrophic backtracking in Kong paths is a theoretical concern. In practice, i
 
 ---
 
-## 8. SNI, source IP, and destination IP/port constraints
+## 8. ~~SNI, source IP, and destination IP/port constraints~~ ✓ Done
 
-### What is missing
+### What was missing
 
 Kong supports L4 routing constraints beyond HTTP: TLS SNI values, client source IP address/CIDR ranges and ports, and destination IP/CIDR ranges and ports. These are used to route TCP/TLS stream traffic (Kong's stream routing mode) and, in some configurations, HTTP routes with IP allowlist-style constraints.
 
-`kongcheck` completely ignores all three. Every route that has these constraints is analyzed as if those constraints do not exist. Consequences:
+`kongcheck` previously ignored all three. Every route that had these constraints was analyzed as if those constraints did not exist. Consequences were:
 
 - **False positives**: a stream route constrained to `sources=[{ip:"10.0.0.0/8"}]` and an HTTP route constrained to `sources=[{ip:"203.0.113.0/24"}]` would be reported as a collision even though they can never receive the same request.
-- **Incorrect winner identification**: in `explain-request`, SNI/IP constraints are not applied during route filtering, so the wrong route may be reported as the winner.
-- **Mixed control planes**: control planes that handle both HTTP and TCP/TLS traffic produce a high number of meaningless cross-protocol findings.
+- **Incorrect winner identification**: in `explain-request`, SNI/IP constraints were not applied during route filtering, so the wrong route could be reported as the winner.
+- **Mixed control planes**: control planes that handle both HTTP and TCP/TLS traffic produced a high number of meaningless cross-protocol findings.
 
-### Implementation complexity — **Medium to High**
+### Implementation
 
-The data is already fetched (the Konnect API returns `snis`, `sources`, and `destinations` fields on route objects). Three things are needed:
+All three dimensions are now implemented. Ported faithfully from `kong/router/traditional.lua` (commit 2ffd3b1):
 
-1. **Marshalling** — add the three fields to `MarshalledRoute` (or its underlying `KongRoute` type in `src/types.ts`).
-2. **Filtering/matching** — implement IP-in-CIDR matching for `sources` and `destinations` (requires a small CIDR library or hand-rolled implementation), and exact-string SNI matching. CIDR matching in TypeScript is straightforward for IPv4 but adds complexity for IPv6.
-3. **Sort / stratification** — Kong's sort order does not change based on SNI/IP constraints (they don't affect `submatch_weight`, `headerCount`, or `regex_priority`). However, for collision analysis, two routes that are mutually exclusive by SNI or source IP should be treated as stratified (no collision) rather than as overlapping.
+1. **CIDR/IP utilities** (`src/router.ts`) — `parseIpv4`, `cidrToRange`, `ipsCanOverlap`, `ipPortListsOverlap`.
+   IPv4 full support; IPv6 is conservative (returns `true` / assumes overlap — no false negatives).
+   Mirrors Kong's `lua-resty-ipmatcher`-backed `create_range_f` logic.
 
-The CIDR matching logic is the non-trivial piece. Interval intersection for arbitrary CIDR sets is correct but tedious to implement correctly (and even more so for IPv6).
+2. **`matchRoute` simulation** (`src/router.ts`) — SNI, source IP/port, and destination IP/port checks are applied when the corresponding `request.sni` / `request.sourceIp` / `request.destIp` fields are defined (explicit simulation mode).
+   When those fields are `undefined`, the checks are skipped (conservative static-analysis mode — every route remains a collision candidate).
+   Mirrors the `request.headers === undefined` sentinel already used for header constraints.
 
-### Usefulness — **High (for stream-route users), Low (for HTTP-only users)**
+3. **Stratification analysis** (`src/analyzer.ts`) — `isSniIpStratified` classifies route pairs on four L4 dimensions:
+   - **Protocol family**: one route all-HTTP (`http/https/grpc/grpcs`), other all-stream (`tcp/tls/udp/tls_passthrough`) → mutually exclusive.
+   - **SNI**: both routes have non-empty `snis` sets and they are completely disjoint (FQDN trailing-dot normalised to match Kong's `sub(sni, 1, -2)`).
+   - **Source IP/port**: both routes have `sources` lists and `ipPortListsOverlap` returns `false`.
+   - **Destination IP/port**: both routes have `destinations` lists and `ipPortListsOverlap` returns `false`.
+     Stratified pairs emit an **INFO** finding (gated by `--no-info`) instead of a HIGH/MEDIUM collision.
+     This check runs before the `haveIdenticalPaths` / header-stratification block in both `detectCollisions` and `detectSiblingOverlaps`.
 
-For control planes that are HTTP-only, this gap produces zero false positives and zero missed findings. For control planes that mix HTTP and stream routes, this is probably the most disruptive source of noise — every stream route pair generates false-positive collision findings, drowning out the real findings.
+### Kong source references
 
-The practical fix for HTTP-only users today is `--filter tag:<stream-tag>` to exclude stream routes. But this requires user knowledge of which routes are stream routes and consistent tagging discipline.
+- `traditional.lua#L279–L284` — `create_range_f` (CIDR factory using `lua-resty-ipmatcher`)
+- `traditional.lua#L493–L518` — SNI marshalling (trailing-dot strip, `snis_t` map)
+- `traditional.lua#L522–L577` — sources/destinations marshalling
+- `traditional.lua#L880–L900` — `matcher_src_dst` (per-entry IP+port check, OR semantics)
+- `traditional.lua#L1072–L1085` — `MATCH_RULES.SNI`, `MATCH_RULES.SRC`, `MATCH_RULES.DST` handlers
 
-### Testability — **Medium**
+### Test coverage
 
-IP matching and CIDR interval logic is easily unit-tested in isolation. Integration tests for `analyzeRoutes` with stream-route configurations are straightforward to write: two routes with non-overlapping source IP ranges and the same path → no finding.
-
-The complexity rises when testing CIDR intersection (overlapping ranges on the same route) and IPv6 edge cases.
-
-### Realism — **Common (for multi-protocol control planes)**
-
-Kong Konnect is increasingly used for L4 routing (database proxying, IoT, gRPC over TCP). Any control plane that hosts both HTTP APIs and TCP stream routes will produce false-positive collision findings for every stream route that happens to share a path pattern with an HTTP route. This is the second-highest-impact gap after the wildcard-host sort ordering issue (gap 1).
-
-For pure HTTP-only control planes (still the majority of production deployments), this gap has zero practical impact.
+- `src/router.test.ts` — unit tests for `parseIpv4`, `cidrToRange`, `ipsCanOverlap`, `ipPortListsOverlap`; `matchRoute` with SNI/source/dest fields.
+- `src/analyzer.test.ts` — integration tests for SNI stratification (disjoint/overlapping sets, trailing-dot normalisation, `includeInfo=false`), source/dest CIDR stratification, protocol-family stratification, and the "only one side has the constraint" case.
 
 ---
 
@@ -336,12 +353,14 @@ For pure HTTP-only control planes (still the majority of production deployments)
 | 3   | Header-constrained identical paths         | — (partially done) | —                                   | —              | —                  |
 | 4   | Regex header values (`~*`) — Option A      | Low ✓ (approx.)    | Medium                              | Easy (approx.) | Occasional         |
 | 5   | Non-identical paths + header on winner     | — (intentional)    | —                                   | —              | —                  |
-| 6   | URI normalization / query-string stripping | Low                | Low                                 | Easy           | Rare               |
+| 6   | URI normalization / query-string stripping | Low ✓              | Low                                 | Easy ✓         | Rare               |
 | 7   | PCRE backtrack limit                       | Very High          | Low                                 | Hard           | Rare               |
-| 8   | SNI / source IP / destination IP+port      | Medium–High        | High (stream CPs) / Low (HTTP-only) | Medium         | Common (mixed CPs) |
+| 8   | SNI / source IP / destination IP+port      | Medium–High ✓      | High (stream CPs) / Low (HTTP-only) | Medium         | Common (mixed CPs) |
 
 ### Recommended implementation priority
 
 ~~1. **Gap 1 (wildcard-host sort)**~~ ✓ Done.
 ~~2. **Gap 4 (regex header values) — Option A**~~ ✓ Done.
-~~3. **Gap 2 (wildcard host port)**~~ ✓ Done. 4. **Gap 8 (SNI / IP constraints)** — critical for mixed HTTP+stream control planes; zero impact on HTTP-only deployments. An interim `--filter` workaround exists. 5. **Gap 6 (URI normalization)** — quality-of-life, very low priority. 6. **Gap 7 (PCRE backtrack limit)** — theoretical; not worth implementing beyond what the existing `suspicious_regex` linter already provides.
+~~3. **Gap 2 (wildcard host port)**~~ ✓ Done.
+~~4. **Gap 8 (SNI / IP constraints)**~~ ✓ Done.
+~~5. **Gap 6 (URI normalization)**~~ ✓ Done. 6. **Gap 7 (PCRE backtrack limit)** — theoretical; not worth implementing beyond what the existing `suspicious_regex` linter already provides.

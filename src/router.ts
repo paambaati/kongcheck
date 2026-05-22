@@ -376,8 +376,195 @@ function matchHeaders(routeHeaders: Record<string, string[]>, reqHeaders: Record
 }
 
 /**
- * Tests whether a marshalled route matches an incoming request, considering
- * paths, methods, hosts, and header constraints.
+ * Parses a dotted-decimal IPv4 address string into a 32-bit unsigned integer,
+ * or returns `null` for any non-IPv4 input (IPv6, malformed, etc.).
+ *
+ * Used as the building block for CIDR range checks that mirror Kong's
+ * `lua-resty-ipmatcher` library used in `create_range_f`.
+ *
+ * @see Kong source: [`traditional.lua` – `create_range_f` (~L279-L284)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L279-L284)
+ *
+ * @param ip - A dotted-decimal IPv4 string, e.g. `"192.168.1.1"`.
+ * @returns 32-bit unsigned integer, or `null` if not a valid IPv4 address.
+ */
+export function parseIpv4(ip: string): number | null {
+	const parts = ip.split('.');
+	if (parts.length !== 4) return null;
+	let result = 0;
+	for (const part of parts) {
+		const n = Number(part);
+		if (!Number.isInteger(n) || n < 0 || n > 255 || part === '') return null;
+		result = (result * 256 + n) >>> 0;
+	}
+	return result;
+}
+
+/**
+ * Parses a CIDR notation string (e.g. `"10.0.0.0/8"`) into an inclusive
+ * `[lo, hi]` IPv4 range of 32-bit unsigned integers, or returns `null` for
+ * any non-IPv4 CIDR (IPv6, malformed, out-of-range prefix length).
+ *
+ * `null` is the conservative "unknown" sentinel: callers that receive `null`
+ * should assume potential overlap rather than emit a false negative.
+ *
+ * @see Kong source: [`traditional.lua` – `create_range_f` using `ipmatcher.new`](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L279-L284)
+ *
+ * @param cidr - A CIDR string, e.g. `"192.168.0.0/24"`.
+ * @returns `[lo, hi]` inclusive range, or `null`.
+ */
+export function cidrToRange(cidr: string): [number, number] | null {
+	const slashIdx = cidr.indexOf('/');
+	if (slashIdx === -1) return null;
+
+	const host = cidr.slice(0, slashIdx);
+	const prefixStr = cidr.slice(slashIdx + 1);
+	const prefix = Number(prefixStr);
+
+	if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32 || prefixStr === '') return null;
+
+	const hostInt = parseIpv4(host);
+	if (hostInt === null) return null; // IPv6 or malformed
+
+	// Build the network mask and compute lo/hi.
+	// For prefix=0, mask=0x00000000 (all IPs). For prefix=32, mask=0xFFFFFFFF (single IP).
+	const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+	const lo = (hostInt & mask) >>> 0;
+	const hi = (lo | (~mask >>> 0)) >>> 0;
+	return [lo, hi];
+}
+
+/**
+ * Returns `true` when two IP strings (plain IPs or CIDRs) can describe at
+ * least one overlapping IP address.
+ *
+ * Conservative: returns `true` (assumes overlap) for any input that is not a
+ * valid IPv4 address or CIDR — this includes IPv6 addresses and malformed
+ * strings. This guarantees no false negatives (we never incorrectly claim two
+ * addresses are disjoint).
+ *
+ * @param ipA - Plain IPv4 or CIDR string, e.g. `"10.0.0.0/8"` or `"1.2.3.4"`.
+ * @param ipB - Plain IPv4 or CIDR string.
+ */
+export function ipsCanOverlap(ipA: string, ipB: string): boolean {
+	// Resolve each side to an inclusive [lo, hi] range.
+	// Plain IP → [point, point]; CIDR → cidrToRange(); unknown → null.
+	const rangeA: [number, number] | null = ipA.includes('/')
+		? cidrToRange(ipA)
+		: ((): [number, number] | null => {
+				const p = parseIpv4(ipA);
+				return p !== null ? [p, p] : null;
+			})();
+
+	const rangeB: [number, number] | null = ipB.includes('/')
+		? cidrToRange(ipB)
+		: ((): [number, number] | null => {
+				const p = parseIpv4(ipB);
+				return p !== null ? [p, p] : null;
+			})();
+
+	// If either side can't be resolved (IPv6, malformed), assume overlap.
+	if (rangeA === null || rangeB === null) return true;
+
+	// Ranges overlap iff loA <= hiB AND loB <= hiA.
+	return rangeA[0] <= rangeB[1] && rangeB[0] <= rangeA[1];
+}
+
+/**
+ * Returns `true` when any pair of entries (one from each list) can
+ * simultaneously match the same IP+port combination — i.e. the two
+ * source/destination constraint lists are **not** mutually exclusive.
+ *
+ * Used by the analyzer to determine whether two stream routes could receive
+ * the same connection (overlap = potential collision; no overlap = stratified).
+ *
+ * Entry semantics mirror Kong's `sources`/`destinations` arrays:
+ * - `ip` absent (or `undefined`) → wildcard: any IP matches.
+ * - `ip` present → exact IPv4 match, or CIDR prefix match.
+ * - `port` absent → wildcard: any port matches.
+ * - `port` present → exact port match only.
+ *
+ * Two entries are disjoint (cannot overlap) iff:
+ *   (both have a `port` AND they differ) OR
+ *   (both have an `ip`  AND the IP ranges/addresses don't overlap)
+ *
+ * @see Kong source: [`traditional.lua` – `matcher_src_dst` (~L880-L900)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L880-L900)
+ *
+ * @param listA - Sources or destinations from route A.
+ * @param listB - Sources or destinations from route B.
+ */
+export function ipPortListsOverlap(
+	listA: Array<{ ip?: string; port?: number }>,
+	listB: Array<{ ip?: string; port?: number }>,
+): boolean {
+	for (const a of listA) {
+		for (const b of listB) {
+			// Port disjoint: both constrain a port AND they differ → no overlap for this pair.
+			if (a.port !== undefined && b.port !== undefined && a.port !== b.port) continue;
+
+			// IP disjoint: both constrain an IP AND the ranges don't overlap → no overlap.
+			if (a.ip !== undefined && b.ip !== undefined && !ipsCanOverlap(a.ip, b.ip)) continue;
+
+			// All disjointness checks failed → this pair CAN overlap.
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Tests whether a single source/destination entry matches a given IP+port.
+ *
+ * Direct port of Kong's `matcher_src_dst` per-entry logic:
+ * - If the entry has no IP constraint → ip_ok = true (wildcard).
+ * - If the entry IP is a CIDR → CIDR range check.
+ * - Otherwise → exact IP equality.
+ * - Port: passes when entry has no port constraint, or exact match.
+ *
+ * @see Kong source: [`traditional.lua` – `matcher_src_dst` (~L880-L900)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L880-L900)
+ */
+function matcherSrcDstEntry(
+	entry: { ip?: string; port?: number },
+	reqIp: string,
+	reqPort: number | undefined,
+): boolean {
+	// IP check.
+	let ipOk: boolean;
+	if (!entry.ip) {
+		ipOk = true; // no IP constraint → any IP
+	} else if (entry.ip.includes('/')) {
+		// CIDR match.
+		const range = cidrToRange(entry.ip);
+		const reqInt = parseIpv4(reqIp);
+		// Unknown IP (IPv6, malformed) → conservative: assume no match for simulation,
+		// but this is a simulation-mode function so the caller provides real addresses.
+		ipOk = range !== null && reqInt !== null && reqInt >= range[0] && reqInt <= range[1];
+	} else {
+		ipOk = entry.ip === reqIp; // exact match
+	}
+
+	if (!ipOk) return false;
+
+	// Port check: no port constraint OR exact match.
+	return !entry.port || entry.port === reqPort;
+}
+
+/**
+ * Tests whether a route's source/destination list matches the given IP+port.
+ *
+ * Returns `true` when **any** entry in the list matches (OR semantics), which
+ * is exactly Kong's behaviour in `matcher_src_dst`.
+ *
+ * @see Kong source: [`traditional.lua` – `matcher_src_dst` (~L880-L900)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L880-L900)
+ */
+function matcherSrcDst(
+	entries: Array<{ ip?: string; port?: number }>,
+	reqIp: string,
+	reqPort: number | undefined,
+): boolean {
+	return entries.some((e) => matcherSrcDstEntry(e, reqIp, reqPort));
+}
+
+/*
  *
  * A route matches if **all** of the following hold –
  * - At least one path pattern matches the request URI.
@@ -481,6 +668,63 @@ export function matchRoute(mr: MarshalledRoute, request: SimRequest): boolean {
 	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L963-L1007
 	if (request.headers !== undefined && mr.route.headers) {
 		if (!matchHeaders(mr.route.headers, request.headers)) return false;
+	}
+
+	// SNI check (stream routes).
+	//
+	// Only evaluated when `request.sni` is defined (explicit simulation mode).
+	// When `undefined`, the analyzer is running without L4 context and we skip
+	// the check conservatively so stream routes remain collision candidates.
+	//
+	// Kong semantics: SNI matching is bypassed when `req_scheme == "http"` (no TLS
+	// handshake → no SNI). In our simulator, an undefined `request.sni` covers
+	// both the plain-HTTP case and the "not provided" case — both skip the check.
+	//
+	// Trailing dots in FQDNs are stripped before comparison, mirroring Kong's
+	// `sub(sni, 1, -2)` normalisation in `marshall_route`.
+	//
+	// Kong source (MATCH_RULES.SNI handler) –
+	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1072-L1077
+	// Kong source (trailing-dot strip in marshall_route) –
+	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L511-L513
+	if (request.sni !== undefined) {
+		const snis = mr.route.snis;
+		if (snis && snis.length > 0) {
+			const reqSni = request.sni.endsWith('.') ? request.sni.slice(0, -1) : request.sni;
+			const sniSet = new Set(snis.map((s) => (s.endsWith('.') ? s.slice(0, -1) : s)));
+			if (!sniSet.has(reqSni)) return false;
+		}
+	}
+
+	// Source IP/port check (stream routes).
+	//
+	// Only evaluated when `request.sourceIp` is defined. When `undefined`,
+	// source constraints are skipped so routes remain collision candidates in
+	// static-analysis mode. This mirrors the `request.headers === undefined`
+	// sentinel pattern for header constraints.
+	//
+	// Kong source (MATCH_RULES.SRC handler + matcher_src_dst) –
+	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1079-L1081
+	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L880-L900
+	if (request.sourceIp !== undefined) {
+		const sources = mr.route.sources;
+		if (sources && sources.length > 0) {
+			if (!matcherSrcDst(sources, request.sourceIp, request.sourcePort)) return false;
+		}
+	}
+
+	// Destination IP/port check (stream routes).
+	//
+	// Only evaluated when `request.destIp` is defined.
+	//
+	// Kong source (MATCH_RULES.DST handler + matcher_src_dst) –
+	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1083-L1085
+	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L880-L900
+	if (request.destIp !== undefined) {
+		const destinations = mr.route.destinations;
+		if (destinations && destinations.length > 0) {
+			if (!matcherSrcDst(destinations, request.destIp, request.destPort)) return false;
+		}
 	}
 
 	// Path check – any path pattern matching is sufficient.

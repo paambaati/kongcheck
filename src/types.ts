@@ -95,6 +95,18 @@ export interface KongRoute {
 	 * Used by the `tag:<value>` filter predicate.
 	 */
 	tags?: string[];
+	/**
+	 * Protocols this route listens on, e.g. `["http", "https"]` for HTTP routes
+	 * or `["tcp", "tls"]` for stream routes.
+	 * When absent, all protocols are permitted.
+	 *
+	 * Used for protocol-based stratification analysis: if two routes have
+	 * non-overlapping protocol sets (one all-HTTP, one all-stream) they can never
+	 * simultaneously match the same connection.
+	 *
+	 * @see https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L194-L206 – `SORTED_MATCH_RULES` (stream vs HTTP)
+	 */
+	protocols?: string[];
 	/** SNI constraints (stream routes). */
 	snis?: string[];
 	/** Source IP/port constraints (stream routes). */
@@ -301,6 +313,38 @@ export interface SimRequest {
 	path: string;
 	/** Optional request headers for header-constrained routes. */
 	headers?: Record<string, string>;
+	/**
+	 * TLS SNI value, e.g. `"api.example.com"`. When defined, SNI constraints
+	 * on stream routes are evaluated strictly. When `undefined`, the check is
+	 * skipped (conservative static-analysis mode — every route is a candidate).
+	 *
+	 * Kong source (SNI matcher) –
+	 *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1072-L1077
+	 */
+	sni?: string;
+	/**
+	 * Source IP address of the connection, e.g. `"10.0.1.5"`. When defined,
+	 * source IP/port constraints are evaluated. When `undefined`, skipped.
+	 *
+	 * Kong source (`matcher_src_dst`) –
+	 *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L880-L900
+	 */
+	sourceIp?: string;
+	/**
+	 * Source TCP/UDP port of the connection, e.g. `54321`. Evaluated only when
+	 * `sourceIp` is also defined.
+	 */
+	sourcePort?: number;
+	/**
+	 * Destination IP address of the connection, e.g. `"192.168.0.1"`. When
+	 * defined, destination IP/port constraints are evaluated.
+	 */
+	destIp?: string;
+	/**
+	 * Destination TCP/UDP port of the connection, e.g. `443`. Evaluated only
+	 * when `destIp` is also defined.
+	 */
+	destPort?: number;
 }
 
 /**
