@@ -30,7 +30,7 @@ import { normalizePath } from './utils.ts';
 /** Fields common to every tool that needs a live Konnect connection. */
 const konnectParams = {
 	controlPlaneId: z
-		.string()
+		.uuid()
 		.optional()
 		.describe(
 			'UUID of the Konnect control plane to inspect. ' +
