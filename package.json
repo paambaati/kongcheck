@@ -35,12 +35,12 @@
 	},
 	"devDependencies": {
 		"@modelcontextprotocol/sdk": "1.29.0",
-		"@types/bun": "1.3.13",
+		"@types/bun": "1.3.14",
 		"cac": "7.0.0",
 		"nspin-bun": "1.2.0",
-		"oxfmt": "0.48.0",
-		"oxlint": "1.63.0",
-		"oxlint-tsgolint": "0.22.1",
+		"oxfmt": "0.51.0",
+		"oxlint": "1.66.0",
+		"oxlint-tsgolint": "0.23.0",
 		"tiny-relative-date": "2.0.2",
 		"typescript": "6.0.3"
 	},
