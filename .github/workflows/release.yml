@@ -52,7 +52,7 @@ jobs:
           bun-version: latest
 
       - uses: actions/cache@v6
-        name: Cache Bun dependencies
+        name: Setup Bun cache
         with:
           path: ~/.bun/install/cache
           key: bun-cache-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
