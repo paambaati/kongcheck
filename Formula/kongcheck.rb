@@ -2,27 +2,27 @@ class Kongcheck < Formula
   desc "CLI tool for detecting Kong Konnect route collisions and shadowing"
   homepage "https://github.com/paambaati/kongcheck"
   license "MIT"
-  version "1.1.3"
+  version "1.1.4"
 
   on_macos do
     on_arm do
-      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.3/kongcheck-darwin-arm64"
-      sha256 "50cabf0cf29bb459c36f0e3856e51669abc8a35f3e5119e292c6fc4b41c935fb"
+      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.4/kongcheck-darwin-arm64"
+      sha256 "dbd5b07d957cfb9c7d848e91c44ca03b102b80659ebdac6b0d9cba7011740fb7"
     end
     on_intel do
-      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.3/kongcheck-darwin-x64"
-      sha256 "27329b17a41065d6c6b9930362ec03ced1f51876d56f80c40ec4ff563752b99f"
+      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.4/kongcheck-darwin-x64"
+      sha256 "6f63eb113409a2640a3acccd67262e8c21bbf355a7443e18e855555f157bb692"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.3/kongcheck-linux-arm64"
-      sha256 "5d51442b8e6ecb235aa902180e1e7924b3f5727077c00930d7b6ab0b7db37a33"
+      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.4/kongcheck-linux-arm64"
+      sha256 "0ef4ae27ee81aea1fbdcdd565c5362e53628ed8878510ef8a5f8ccb000bed4a6"
     end
     on_intel do
-      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.3/kongcheck-linux-x64"
-      sha256 "4782fb55774ae01306302d70619848abf3422403440b7403e4afda0b8b2cd5e3"
+      url "https://github.com/paambaati/kongcheck/releases/download/v1.1.4/kongcheck-linux-x64"
+      sha256 "2f7f3fbbc25cbe3c92776fe374fbe39c9341ffdb30ab936f73b282cd275e693d"
     end
   end
 
