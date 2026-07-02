@@ -460,3 +460,7 @@ try {
 	cli.outputHelp();
 	process.exit(1);
 }
+
+if (!cli.matchedCommand && !cli.options['help']) {
+	cli.outputHelp();
+}
