@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.5](https://github.com/paambaati/kongcheck/compare/v1.1.4...v1.1.5) (2026-07-02)
+
+
+### Bug Fixes
+
+* **cli:** print help when no inputs and no flags are given ([669f4f9](https://github.com/paambaati/kongcheck/commit/669f4f927a4989256a2eb027d550edb8fe1bf861))
+
 ## [1.1.4](https://github.com/paambaati/kongcheck/compare/v1.1.3...v1.1.4) (2026-07-02)
 
 
