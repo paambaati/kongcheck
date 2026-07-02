@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/paambaati/kongcheck/compare/v1.1.1...v1.1.2) (2026-07-02)
+
+
+### Bug Fixes
+
+* **ci:** make sure Homebrew updates are signed/verified too ([d61719d](https://github.com/paambaati/kongcheck/commit/d61719d973479aa2e3ac812461abfc30d86b51a0))
+
 ## [1.1.1](https://github.com/paambaati/kongcheck/compare/v1.1.0...v1.1.1) (2026-07-02)
 
 
