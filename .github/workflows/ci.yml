@@ -7,6 +7,9 @@ jobs:
   lint-and-test:
     name: Lint & test
     runs-on: ubuntu-slim
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v6
         name: Checkout code
@@ -37,7 +40,7 @@ jobs:
       - uses: codecov/codecov-action@v7
         name: Upload coverage reports to Codecov  
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           directory: .coverage
           fail_ci_if_error: true
           disable_telem: true
