@@ -51,6 +51,13 @@ jobs:
         with:
           bun-version: latest
 
+      - uses: actions/cache@v6
+        name: Cache Bun dependencies
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          restore-keys: bun-cache-${{ runner.os }}-
+
       - uses: ruby/setup-ruby@v1
         name: Setup Ruby
         with:
