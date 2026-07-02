@@ -30,3 +30,14 @@ jobs:
 
       - name: Lint & typecheck
         run: bun run lint
+
+      - name: Run tests
+        run: bun test
+
+      - uses: codecov/codecov-action@v7
+        name: Upload coverage reports to Codecov  
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: .coverage
+          fail_ci_if_error: true
+          disable_telem: true
