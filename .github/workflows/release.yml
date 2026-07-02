@@ -112,10 +112,19 @@ jobs:
           SHA_LINUX_ARM64: ${{ steps.sha256.outputs.linux_arm64 }}
 
       - name: Commit and push Homebrew formula update
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(jq -r '.version' package.json)
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/kongcheck.rb
-          git commit -m "chore: update Homebrew formula to v${VERSION} [skip ci]"
-          git push
+          FORMULA_CONTENT=$(base64 -w0 Formula/kongcheck.rb)
+
+          SHA=$(gh api repos/${{ github.repository }}/contents/Formula/kongcheck.rb \
+            --jq '.sha')
+
+          gh api repos/${{ github.repository }}/contents/Formula/kongcheck.rb \
+            -X PUT \
+            -f message="chore: update Homebrew formula to v${VERSION} [skip ci]" \
+            -f content="$FORMULA_CONTENT" \
+            -f sha="$SHA" \
+            -f "committer[name]=github-actions[bot]" \
+            -f "committer[email]=github-actions[bot]@users.noreply.github.com"
