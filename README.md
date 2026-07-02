@@ -1,5 +1,7 @@
 # `kongcheck`
 
+[![Coverage](https://codecov.io/gh/paambaati/kongcheck/graph/badge.svg?token=suf0ASLYVT)](https://codecov.io/gh/paambaati/kongcheck)
+
 <img src="docs/images/kongcheck.svg" height="100" width="100"/>
 
 An LLM-friendly CLI tool for auditing [Kong Konnect](https://konghq.com/products/kong-konnect) routing configuration.
