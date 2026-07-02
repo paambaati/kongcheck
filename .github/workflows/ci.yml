@@ -4,8 +4,8 @@ on:
   workflow_call:
 
 jobs:
-  lint-and-typecheck:
-    name: Lint & typecheck
+  lint-and-test:
+    name: Lint & test
     runs-on: ubuntu-slim
     steps:
       - uses: actions/checkout@v6
@@ -32,7 +32,7 @@ jobs:
         run: bun run lint
 
       - name: Run tests
-        run: bun test
+        run: bun run test:coverage
 
       - uses: codecov/codecov-action@v7
         name: Upload coverage reports to Codecov  
