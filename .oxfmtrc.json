@@ -7,5 +7,5 @@
 	"tabWidth": 2,
 	"sortImports": true,
 	"sortPackageJson": true,
-	"ignorePatterns": []
+	"ignorePatterns": ["CHANGELOG.md"]
 }
