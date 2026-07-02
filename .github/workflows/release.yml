@@ -13,10 +13,8 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
-      # Output keys for a package at path "." in a packages-style config are
-      # prefixed with the path, i.e. ".--release_created" and ".--tag_name".
-      release_created: ${{ steps.release.outputs['.--release_created'] }}
-      tag_name: ${{ steps.release.outputs['.--tag_name'] }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
 
     steps:
       - uses: googleapis/release-please-action@v5
