@@ -516,7 +516,7 @@ Kong supports three router flavors. `kongcheck` auto-detects the flavor from you
 
 ## MCP server
 
-`kongcheck` includes an [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server so AI agents — Claude Desktop, Cursor, VS Code Copilot, and others — can call its tools directly without copy-pasting terminal output.
+`kongcheck` includes an [MCP](https://modelcontextprotocol.io) (Model Context Protocol) server so AI agents — OpenCode, Claude Desktop, Cursor, VS Code Copilot, and others — can call its tools directly without copy-pasting terminal output.
 
 ### Transport
 
