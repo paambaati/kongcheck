@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.3](https://github.com/paambaati/kongcheck/compare/v1.1.2...v1.1.3) (2026-07-02)
+
+
+### Bug Fixes
+
+* **ci:** sign commits with my own GPG key for bot commits ([0a6bc21](https://github.com/paambaati/kongcheck/commit/0a6bc21e265a900a3b4b0f88f42b73a59981b5e6))
+
 ## [1.1.2](https://github.com/paambaati/kongcheck/compare/v1.1.1...v1.1.2) (2026-07-02)
 
 
