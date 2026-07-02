@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4](https://github.com/paambaati/kongcheck/compare/v1.1.3...v1.1.4) (2026-07-02)
+
+
+### Bug Fixes
+
+* **ci:** use own GPG keys for auto-commits ([d8d1bdc](https://github.com/paambaati/kongcheck/commit/d8d1bdccb9da8fc400c06cf7bfc19fe778d03868))
+
 ## [1.1.3](https://github.com/paambaati/kongcheck/compare/v1.1.2...v1.1.3) (2026-07-02)
 
 
