@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/paambaati/kongcheck/compare/v1.1.0...v1.1.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **ci:** fix incorrect release workflow logic ([9c14b13](https://github.com/paambaati/kongcheck/commit/9c14b1356218a98386b29bec11f59a338a98c980))
+
 ## [1.1.0](https://github.com/paambaati/kongcheck/compare/v1.0.0...v1.1.0) (2026-07-02)
 
 
