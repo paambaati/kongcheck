@@ -14,14 +14,53 @@
 import type { KongRoute, KongService, KonnectConfig, KonnectData, RouterFlavor } from './types.ts';
 
 /** Maps short region codes to their Konnect API base URLs. */
-const REGION_MAP: Record<string, string> = {
+export const REGION_MAP: Record<string, string> = {
 	us: 'https://us.api.konghq.com',
 	eu: 'https://eu.api.konghq.com',
 	au: 'https://au.api.konghq.com',
 	me: 'https://me.api.konghq.com',
 	in: 'https://in.api.konghq.com',
 	sg: 'https://sg.api.konghq.com',
-};
+} as const;
+
+/**
+ * UUID v4 pattern.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Maximum number of pages to fetch per resource type.
+ * Guards against infinite pagination loops or unexpectedly large data sets.
+ */
+const MAX_PAGES = 200;
+
+/**
+ * Maximum number of times to retry a retryable API error (429 / 503) before
+ * giving up.
+ */
+const MAX_RETRIES = 3;
+
+/**
+ * Error thrown when the Konnect API returns a non-2xx status code.
+ *
+ * Carries the numeric HTTP status so that the retry logic in `fetchPage` can
+ * distinguish retryable errors (429 rate-limited, 503 service unavailable)
+ * from fatal errors (401 unauthorised, 404 not found, etc.).
+ *
+ * Error messages have any embedded Bearer tokens redacted and are truncated to
+ * 1024 characters to prevent large API response bodies (which may contain
+ * sensitive routing config) from leaking into logs or being displayed to
+ * end-users.
+ */
+export class KonnectApiError extends Error {
+	constructor(
+		message: string,
+		public readonly status: number,
+	) {
+		super(message);
+		this.name = 'KonnectApiError';
+	}
+}
 
 /**
  * Shape of a single page returned by the Konnect list endpoints.
@@ -40,28 +79,84 @@ interface KonnectPage<T> {
 }
 
 /**
+ * Parses the `Retry-After` response header and returns the delay in
+ * milliseconds.
+ *
+ * The header may contain either an integer number of seconds or an HTTP-date
+ * string. Returns `undefined` when the header is absent or unparsable.
+ *
+ * @param header - Raw value of the `Retry-After` header, or `null` if absent.
+ */
+function parseRetryAfterMs(header: string | null): number | undefined {
+	if (!header) return undefined;
+	// Integer seconds (most common).
+	const seconds = Number(header);
+	if (isFinite(seconds) && seconds >= 0) return seconds * 1000;
+	// HTTP-date string ("Mon, 01 Jan 2024 00:00:00 GMT").
+	const epoch = Date.parse(header);
+	if (!isNaN(epoch)) return Math.max(0, epoch - Date.now());
+	return undefined;
+}
+
+/**
  * Fetches a single page from a Konnect list endpoint.
+ *
+ * Automatically retries on HTTP 429 (rate-limited) and 503 (service
+ * unavailable), honouring the `Retry-After` response header when present and
+ * falling back to exponential backoff otherwise. Non-retryable errors are
+ * thrown immediately as {@link KonnectApiError}.
+ *
+ * Error bodies are redacted (Bearer tokens removed) and truncated to 1024
+ * characters before being included in the error message.
  *
  * @param url     - Fully-qualified URL, including any query parameters.
  * @param token   - Bearer token.
+ * @param signal  - Optional AbortSignal for request cancellation.
  * @returns The parsed JSON response.
- * @throws If the HTTP response status is not 2xx.
+ * @throws {@link KonnectApiError} If the HTTP response status is not 2xx.
  */
 async function fetchPage<T>(url: string, token: string, signal?: AbortSignal): Promise<KonnectPage<T>> {
-	const response = await fetch(url, {
-		signal,
-		headers: {
-			Authorization: `Bearer ${token}`,
-			Accept: 'application/json',
-		},
-	});
+	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+		const response = await fetch(url, {
+			signal,
+			headers: {
+				Authorization: `Bearer ${token}`,
+				Accept: 'application/json',
+			},
+		});
 
-	if (!response.ok) {
-		const body = await response.text().catch(() => '(unreadable body)');
-		throw new Error(`Konnect API error: ${response.status} ${response.statusText} – ${url}\n${body}`);
+		if (response.ok) {
+			return response.json() as Promise<KonnectPage<T>>;
+		}
+
+		// Sanitise the error body before surfacing it –
+		// 1. Redact Bearer tokens that may appear in error reflections.
+		// 2. Truncate to 1024 chars to prevent log-flooding.
+		let body = await response.text().catch(() => '(unreadable body)');
+		body = body.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+		if (body.length > 1024) body = body.slice(0, 1024) + '... (truncated)';
+
+		const err = new KonnectApiError(
+			`Konnect API error: ${response.status} ${response.statusText} – ${url}\n${body}`,
+			response.status,
+		);
+
+		// Only retry on 429 (rate limited) and 503 (service unavailable);
+		// throw all other errors immediately without burning retries.
+		const isRetryable = response.status === 429 || response.status === 503;
+		if (!isRetryable || attempt >= MAX_RETRIES) {
+			throw err;
+		}
+
+		// Compute delay: honour Retry-After header; fall back to exponential backoff.
+		// Exponential schedule: 1 s (attempt 0), 2 s (attempt 1), 4 s (attempt 2).
+		const delayMs = parseRetryAfterMs(response.headers.get('Retry-After')) ?? 1000 * Math.pow(2, attempt);
+		await Bun.sleep(delayMs);
 	}
 
-	return response.json() as Promise<KonnectPage<T>>;
+	// TypeScript requires an unreachable return — the loop always throws first.
+	/* c8 ignore next */
+	throw new Error('fetchPage: exhausted retries without resolving');
 }
 
 /** Options forwarded from {@link fetchKonnectConfig} into {@link fetchAll}. */
@@ -73,13 +168,24 @@ interface FetchAllOptions {
 }
 
 /**
+ * Query-parameter names that are safe to forward from a pagination cursor URL
+ * to the next-page request. All other params returned by `page.next`
+ * are discarded to prevent cursor-injection attacks.
+ */
+const ALLOWED_CURSOR_PARAMS = new Set(['offset', 'size']);
+
+/**
  * Iterates all pages of a Konnect list endpoint and collects the full result
  * set.
  *
  * The Konnect API returns a `next` field containing a pre-built URL path for
- * the next page (e.g. `"/routes?offset=TOKEN&size=100"`). We follow that path
- * directly by resolving it against the API origin — this avoids any ambiguity
- * about which query-parameter name (`cursor` vs `offset`) the API uses.
+ * the next page (e.g. `"/routes?offset=TOKEN&size=100"`). We resolve that path
+ * against the API origin and forward only the `offset` and `size` query
+ * parameters — discarding any unexpected params that could be injected via a
+ * malicious cursor.
+ *
+ * Pagination is capped at {@link MAX_PAGES} pages per resource type to guard
+ * against infinite loops or unexpectedly large data sets.
  */
 async function fetchAll<T>(baseUrl: string, token: string, opts: FetchAllOptions = {}): Promise<T[]> {
 	const { pageSize = 100, verbose = false, label = '' } = opts;
@@ -93,15 +199,24 @@ async function fetchAll<T>(baseUrl: string, token: string, opts: FetchAllOptions
 	do {
 		pageNum++;
 
+		// Guard: stop if we exceed the page cap.
+		if (pageNum > MAX_PAGES) {
+			if (verbose) console.warn(`  [${displayLabel}] warning: reached MAX_PAGES=${MAX_PAGES} limit, stopping`);
+			break;
+		}
+
 		// First page: build URL from baseUrl with ?size=N.
-		// Subsequent pages: keep baseUrl path but replace the query string with whatever
-		// the API returned in `page.next`. The `next` value is a path like
-		// "/routes?offset=TOKEN&size=100" — it has the right query params but lacks the
-		// full control-plane URL prefix, so we resolve against baseUrl not the origin.
+		// Subsequent pages: follow the `page.next` cursor but forward only
+		// the whitelisted params (offset, size) to prevent cursor injection.
 		let requestUrl: string;
 		if (nextPath) {
 			const u = new URL(baseUrl);
-			u.search = new URL(nextPath, 'https://x').search;
+			const cursor = new URL(nextPath, 'https://x');
+			u.search = '';
+			for (const key of ALLOWED_CURSOR_PARAMS) {
+				const val = cursor.searchParams.get(key);
+				if (val !== null) u.searchParams.set(key, val);
+			}
 			requestUrl = u.toString();
 		} else {
 			const u = new URL(baseUrl);
@@ -175,7 +290,20 @@ export async function fetchKonnectConfig(
 		throw new Error(`Unknown region "${region}". Valid regions – ${Object.keys(REGION_MAP).join(', ')}`);
 	}
 
-	const entityBase = `${baseUrl}/v2/control-planes/${config.controlPlaneId}/core-entities`;
+	// Validate controlPlaneId is a well-formed UUID before interpolating it
+	// into API URLs. This prevents path-traversal or injection via a malformed
+	// ID value.
+	if (!UUID_RE.test(config.controlPlaneId)) {
+		throw new Error(
+			`Invalid controlPlaneId: "${config.controlPlaneId}" is not a UUID. ` +
+				'Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+		);
+	}
+
+	// Encode the ID defensively even though it is UUID-validated above, so that
+	// any future relaxation of the format validation cannot introduce injection.
+	const encodedCpId = encodeURIComponent(config.controlPlaneId);
+	const entityBase = `${baseUrl}/v2/control-planes/${encodedCpId}/core-entities`;
 
 	if (options.verbose) {
 		console.log(`Fetching routes and services from ${entityBase} ...`);
@@ -213,8 +341,7 @@ export async function fetchKonnectConfig(
 	// fetched routes: expression-flavor routes carry an `expression` field that
 	// traditional routes never have.
 	const routerFlavor =
-		(await detectRouterFlavor(baseUrl, config.controlPlaneId, config.token)) ??
-		inferFlavorFromRoutes(rawRoutes, options.verbose);
+		(await detectRouterFlavor(baseUrl, encodedCpId, config.token)) ?? inferFlavorFromRoutes(rawRoutes, options.verbose);
 
 	return {
 		routes: rawRoutes,
@@ -258,16 +385,16 @@ function inferFlavorFromRoutes(routes: KongRoute[], verbose?: boolean): RouterFl
  * back to {@link inferFlavorFromRoutes}.
  *
  * @param baseUrl        - Konnect API base URL, e.g. `"https://us.api.konghq.com"`.
- * @param controlPlaneId - UUID of the control plane.
+ * @param encodedCpId    - URL-encoded UUID of the control plane.
  * @param token          - Bearer token.
  */
 async function detectRouterFlavor(
 	baseUrl: string,
-	controlPlaneId: string,
+	encodedCpId: string,
 	token: string,
 ): Promise<RouterFlavor | undefined> {
 	try {
-		const url = `${baseUrl}/v2/control-planes/${controlPlaneId}`;
+		const url = `${baseUrl}/v2/control-planes/${encodedCpId}`;
 		const response = await fetch(url, {
 			headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
 		});

@@ -157,7 +157,11 @@ describe('fetchKonnectConfigCached', () => {
 			return stubData(`call-${calls}`);
 		};
 		// Seed the cache with a timestamp far in the past (already expired).
-		_cache.set('us:cp-test', { data: stubData('stale'), fetchedAt: Date.now() - 120_000 });
+		_cache.set('us:cp-test', {
+			data: stubData('stale'),
+			fetchedAt: Date.now() - 120_000,
+			marshalledByFlavor: new Map(),
+		});
 		const result = await fetchKonnectConfigCached(fakeCfg, 60_000, stub);
 		expect(calls, 'fetch function must be called once when cache entry is expired').toBe(1);
 		expect(
@@ -202,8 +206,8 @@ describe('fetchKonnectConfigCached', () => {
 	it('evicts expired entries for other keys when writing a fresh entry', async () => {
 		// Pre-seed two expired entries for different keys.
 		const expiredAt = Date.now() - 120_000;
-		_cache.set('us:cp-other-1', { data: stubData('old-1'), fetchedAt: expiredAt });
-		_cache.set('eu:cp-other-2', { data: stubData('old-2'), fetchedAt: expiredAt });
+		_cache.set('us:cp-other-1', { data: stubData('old-1'), fetchedAt: expiredAt, marshalledByFlavor: new Map() });
+		_cache.set('eu:cp-other-2', { data: stubData('old-2'), fetchedAt: expiredAt, marshalledByFlavor: new Map() });
 		const stub = async (_cfg: KonnectConfig) => stubData('fresh');
 		await fetchKonnectConfigCached(fakeCfg, 60_000, stub);
 		expect(_cache.has('us:cp-other-1'), 'expired entry for a different key must be evicted on write').toBe(false);
@@ -213,7 +217,7 @@ describe('fetchKonnectConfigCached', () => {
 
 	it('does not evict a still-valid entry for a different key', async () => {
 		// Pre-seed a non-expired entry for a different key.
-		_cache.set('eu:cp-other', { data: stubData('valid'), fetchedAt: Date.now() });
+		_cache.set('eu:cp-other', { data: stubData('valid'), fetchedAt: Date.now(), marshalledByFlavor: new Map() });
 		const stub = async (_cfg: KonnectConfig) => stubData('fresh');
 		await fetchKonnectConfigCached(fakeCfg, 60_000, stub);
 		expect(_cache.has('eu:cp-other'), 'a non-expired entry for a different key must not be evicted').toBe(true);

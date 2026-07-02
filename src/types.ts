@@ -227,6 +227,35 @@ export interface MarshalledRoute {
 	 * Affects whether regex paths receive a `^` start anchor.
 	 */
 	flavor: RouterFlavor;
+	/**
+	 * Sorted, pipe-joined canonical representation of `route.paths`.
+	 * Pre-computed by `marshalRoute` for identical-path comparison
+	 * in `haveIdenticalPaths`.
+	 *
+	 * Equivalent to `(route.paths ?? []).slice().sort().join('|')`.
+	 */
+	pathFingerprint: string;
+	/**
+	 * Whether this route is a universal matcher — its path set collectively
+	 * matches every possible request URL (e.g. a plain `/` prefix, or a
+	 * traditional-flavor regex like `~/?$`).
+	 *
+	 * Default `false` from `marshalRoute`. Stamped to the real computed value
+	 * by `analyzeRoutes` after all routes are marshalled, so the probe logic
+	 * runs exactly once per route instead of once per pair comparison.
+	 */
+	isUniversal: boolean;
+	/**
+	 * Pre-compiled regex patterns for `~*`-prefixed header constraint values.
+	 *
+	 * Keyed by **lowercase** header name. An entry is present only when the
+	 * header has exactly one allowed value and that value starts with `~*`.
+	 * A `null` value means the pattern failed to compile (treated as no-match).
+	 *
+	 * Computed once in `marshalRoute` to avoid re-compiling the same
+	 * `RegExp` on every `matchHeaders` call during simulation.
+	 */
+	headerPatterns: Map<string, RegExp | null>;
 }
 
 /**

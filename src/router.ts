@@ -209,7 +209,42 @@ export function marshalRoute(
 	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L686-L688 (sort, headers[0] comparison)
 	const headerCount = route.headers ? Object.keys(route.headers).length : 0;
 
-	return { route, service, parsedPaths, maxUriLength, hasRegexPath, subMatchWeight, headerCount, flavor };
+	// pathFingerprint: sorted pipe-joined path set used for O(1) identical-path
+	// comparison across the entire analysis pass.
+	const pathFingerprint = (route.paths ?? []).slice().sort().join('|');
+
+	// headerPatterns: compile ~* header regex values exactly once here so that
+	// matchHeaders never calls `new RegExp()` in its hot loop.
+	// Kong source: traditional.lua#L400-L412 – header_pattern construction.
+	const headerPatterns = new Map<string, RegExp | null>();
+	if (route.headers) {
+		for (const [name, values] of Object.entries(route.headers)) {
+			if (values.length === 1 && values[0]!.startsWith('~*')) {
+				const lowerName = name.toLowerCase();
+				try {
+					headerPatterns.set(lowerName, new RegExp(values[0]!.slice(2)));
+				} catch {
+					// Malformed ~* pattern – store null so matchHeaders treats
+					// it as a non-match rather than a compile-time crash.
+					headerPatterns.set(lowerName, null);
+				}
+			}
+		}
+	}
+
+	return {
+		route,
+		service,
+		parsedPaths,
+		maxUriLength,
+		hasRegexPath,
+		subMatchWeight,
+		headerCount,
+		flavor,
+		pathFingerprint,
+		isUniversal: false, // stamped to real value by analyzeRoutes after all routes are marshalled
+		headerPatterns,
+	};
 }
 
 /**
@@ -321,22 +356,25 @@ export function matchPath(parsed: ParsedPath, reqPath: string): boolean {
  * - Within a single header name, **any** of the allowed values may match
  *   (OR semantics across values).
  * - Values are compared **case-insensitively** (Kong lowercases both sides).
- * - A single value starting with `~*` is treated as a PCRE/JS regex –
- *   `header_pattern = value.slice(2)` is matched with `RegExp.test()`.
- *   This mirrors the `header_pattern` field built in Kong's `marshall_route` –
- *   the regex branch is only enabled when there is exactly one value **and**
- *   it starts with `~*`.
+ * - A single value starting with `~*` is treated as a PCRE/JS regex.
+ *   The compiled `RegExp` is taken from `headerPatterns` (pre-compiled in
+ *   `marshalRoute`) rather than being built fresh on every call.
  *
- * Kong source (marshal, `header_pattern` construction) –
- *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L378-L418
- * Kong source (match, `MATCH_RULES.HEADER` handler) –
- *   https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L963-L1007
+ * @see Kong source ([marshal, `header_pattern` construction](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L378-L418))
+ * @see Kong source ([match, `MATCH_RULES.HEADER` handler](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L963-L1007))
  *
- * @param routeHeaders  - The `route.headers` map from the Kong route entity.
- * @param reqHeaders    - The incoming request headers (key → single value).
+ * @param routeHeaders   - The `route.headers` map from the Kong route entity.
+ * @param reqHeaders     - The incoming request headers (key → single value).
+ * @param headerPatterns - Pre-compiled regex patterns from `marshalRoute`.
+ *                         Keyed by lowercase header name; present only for
+ *                         single `~*`-prefixed values.
  * @returns `true` when all header constraints are satisfied.
  */
-function matchHeaders(routeHeaders: Record<string, string[]>, reqHeaders: Record<string, string>): boolean {
+function matchHeaders(
+	routeHeaders: Record<string, string[]>,
+	reqHeaders: Record<string, string>,
+	headerPatterns: Map<string, RegExp | null>,
+): boolean {
 	for (const [headerName, allowedValues] of Object.entries(routeHeaders)) {
 		const lowerName = headerName.toLowerCase();
 		const reqValue = reqHeaders[lowerName] ?? reqHeaders[headerName];
@@ -346,20 +384,11 @@ function matchHeaders(routeHeaders: Record<string, string[]>, reqHeaders: Record
 
 		const lowerReqValue = reqValue.toLowerCase();
 
-		// Determine whether this constraint uses regex matching.
-		// Kong only sets `header_pattern` when there is exactly ONE value and
-		// it starts with `~*`.
+		// Use pre-compiled regex from marshalRoute when present.
+		// `headerPatterns` only contains an entry when there is exactly one
+		// value starting with `~*`; undefined means no regex for this header.
 		// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L400-L412
-		const headerPattern: RegExp | null =
-			allowedValues.length === 1 && allowedValues[0]!.startsWith('~*')
-				? (() => {
-						try {
-							return new RegExp(allowedValues[0]!.slice(2));
-						} catch {
-							return null; // malformed pattern → treat as no-match
-						}
-					})()
-				: null;
+		const headerPattern: RegExp | null = headerPatterns.get(lowerName) ?? null;
 
 		// Check whether the request header value satisfies this constraint.
 		// Kong checks values_map first, then falls back to header_pattern regex.
@@ -667,7 +696,7 @@ export function matchRoute(mr: MarshalledRoute, request: SimRequest): boolean {
 	// Kong source (MATCH_RULES.HEADER matcher) –
 	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L963-L1007
 	if (request.headers !== undefined && mr.route.headers) {
-		if (!matchHeaders(mr.route.headers, request.headers)) return false;
+		if (!matchHeaders(mr.route.headers, request.headers, mr.headerPatterns)) return false;
 	}
 
 	// SNI check (stream routes).
@@ -676,7 +705,7 @@ export function matchRoute(mr: MarshalledRoute, request: SimRequest): boolean {
 	// When `undefined`, the analyzer is running without L4 context and we skip
 	// the check conservatively so stream routes remain collision candidates.
 	//
-	// Kong semantics: SNI matching is bypassed when `req_scheme == "http"` (no TLS
+	// Kong semantics – SNI matching is bypassed when `req_scheme == "http"` (no TLS
 	// handshake → no SNI). In our simulator, an undefined `request.sni` covers
 	// both the plain-HTTP case and the "not provided" case — both skip the check.
 	//
@@ -740,7 +769,7 @@ export function matchRoute(mr: MarshalledRoute, request: SimRequest): boolean {
  * list is the winner – this mirrors Kong's `find_match` logic which iterates
  * candidates in priority order and returns on first match.
  *
- * Kong source: [`traditional.lua` – `find_route` / `find_match` (~L1400-L1688)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1400-L1688).
+ * @see Kong source: [`traditional.lua` – `find_route` / `find_match` (~L1400-L1688)](https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L1400-L1688).
  *
  * @param sortedRoutes - Routes sorted by {@link compareRoutes} (highest priority first).
  * @param request      - The request to simulate.

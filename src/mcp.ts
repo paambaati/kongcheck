@@ -21,10 +21,10 @@ import { z } from 'zod';
 
 import { name, version } from '../package.json';
 import { analyzeRoutes } from './analyzer.ts';
-import { fetchKonnectConfig } from './client.ts';
+import { fetchKonnectConfig, REGION_MAP } from './client.ts';
 import { applyFindingFilter, parseFilters, type FilterKey } from './filter.ts';
 import { compareRoutes, marshalRoute, simulateRequest } from './router.ts';
-import type { KonnectData, KonnectConfig, RouterFlavor } from './types.ts';
+import type { KonnectData, KonnectConfig, MarshalledRoute, RouterFlavor } from './types.ts';
 import { normalizePath } from './utils.ts';
 
 /** Fields common to every tool that needs a live Konnect connection. */
@@ -37,9 +37,9 @@ const konnectParams = {
 				'Falls back to the KONNECT_CONTROL_PLANE_ID environment variable.',
 		),
 	region: z
-		.union([z.enum(['us', 'eu', 'au', 'me', 'in', 'sg']), z.string()])
+		.enum(Object.keys(REGION_MAP))
 		.optional()
-		.describe('Konnect region (us | eu | au | me | in | sg). Defaults to KONNECT_REGION env var or "us".'),
+		.describe('Konnect region. Defaults to KONNECT_REGION environment variable or "us".'),
 };
 
 const flavorParam = z
@@ -68,6 +68,16 @@ const filterParam = z
 interface CacheEntry {
 	data: KonnectData;
 	fetchedAt: number;
+	/**
+	 * Lazily populated cache of marshalled+sorted routes per router flavor.
+	 *
+	 * `explain_request` marshals routes on the first call for a given flavor
+	 * and stores the result here, so subsequent calls with the same flavor
+	 * within the TTL window skip the marshal+sort pass.
+	 *
+	 * Cleared automatically whenever the data entry is evicted or overwritten.
+	 */
+	marshalledByFlavor: Map<RouterFlavor, MarshalledRoute[]>;
 }
 
 /**
@@ -97,7 +107,7 @@ export async function fetchKonnectConfigCached(
 			return entry.data;
 		}
 		const data = await _fetchFn(cfg);
-		_cache.set(key, { data, fetchedAt: now });
+		_cache.set(key, { data, fetchedAt: now, marshalledByFlavor: new Map() });
 		// Evict any other entries that have already expired so stale data
 		// doesn't linger in memory after its TTL window closes.
 		for (const [k, e] of _cache) {
@@ -181,19 +191,19 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			},
 		},
 		async ({ controlPlaneId, region, flavor, includeInfo, filter }) => {
-			const cfg = resolveConfig({ controlPlaneId, region });
-			const fetched = await fetch(cfg);
-			const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
-			const allFindings = analyzeRoutes(fetched, { flavor: resolvedFlavor, includeInfo });
-			const predicates = parseFilters(filter?.map((f) => `${f.key}:${f.value}`));
-			const findings = applyFindingFilter(allFindings, predicates, fetched.services);
+			try {
+				const cfg = resolveConfig({ controlPlaneId, region });
+				const fetched = await fetch(cfg);
+				const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
+				const allFindings = analyzeRoutes(fetched, { flavor: resolvedFlavor, includeInfo });
+				const predicates = parseFilters(filter?.map((f) => `${f.key}:${f.value}`));
+				const findings = applyFindingFilter(allFindings, predicates, fetched.services);
 
-			return {
-				content: [
-					{
-						type: 'text',
-						text: JSON.stringify(
-							{
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify({
 								controlPlaneId: cfg.controlPlaneId,
 								routerFlavor: resolvedFlavor,
 								totalRoutes: fetched.routes.length,
@@ -205,13 +215,15 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 									INFO: findings.filter((f) => f.severity === 'INFO').length,
 								},
 								findings,
-							},
-							null,
-							2,
-						),
-					},
-				],
-			};
+							}),
+						},
+					],
+				};
+			} catch (err) {
+				let msg = err instanceof Error ? err.message : String(err);
+				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
+			}
 		},
 	);
 
@@ -228,32 +240,34 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			},
 		},
 		async ({ controlPlaneId, region, flavor, filter }) => {
-			const cfg = resolveConfig({ controlPlaneId, region });
-			const fetched = await fetch(cfg);
-			const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
-			const all = analyzeRoutes(fetched, { flavor: resolvedFlavor, includeInfo: false });
-			const collisions = all.filter((f) => f.type === 'shadowing' || f.type === 'collision');
-			const predicates = parseFilters(filter?.map((f) => `${f.key}:${f.value}`));
-			const findings = applyFindingFilter(collisions, predicates, fetched.services);
+			try {
+				const cfg = resolveConfig({ controlPlaneId, region });
+				const fetched = await fetch(cfg);
+				const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
+				const all = analyzeRoutes(fetched, { flavor: resolvedFlavor, includeInfo: false });
+				const collisions = all.filter((f) => f.type === 'shadowing' || f.type === 'collision');
+				const predicates = parseFilters(filter?.map((f) => `${f.key}:${f.value}`));
+				const findings = applyFindingFilter(collisions, predicates, fetched.services);
 
-			return {
-				content: [
-					{
-						type: 'text',
-						text: JSON.stringify(
-							{
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify({
 								controlPlaneId: cfg.controlPlaneId,
 								routerFlavor: resolvedFlavor,
 								totalRoutes: fetched.routes.length,
 								totalFindings: findings.length,
 								findings,
-							},
-							null,
-							2,
-						),
-					},
-				],
-			};
+							}),
+						},
+					],
+				};
+			} catch (err) {
+				let msg = err instanceof Error ? err.message : String(err);
+				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
+			}
 		},
 	);
 
@@ -344,49 +358,60 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			destIp,
 			destPort,
 		}) => {
-			const cfg = resolveConfig({ controlPlaneId, region });
-			const fetched = await fetch(cfg);
-			const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
+			try {
+				const cfg = resolveConfig({ controlPlaneId, region });
+				const fetched = await fetch(cfg);
+				const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
 
-			const marshalled: ReturnType<typeof marshalRoute>[] = [];
-			for (const r of fetched.routes) {
-				const svc = r.service?.id ? fetched.services.get(r.service.id) : undefined;
-				const paths = r.paths ?? [];
-				if (paths.length <= 1) {
-					marshalled.push(marshalRoute(r, svc, resolvedFlavor));
+				// Use the cached marshalled+sorted route set when available.
+				// The cache entry is keyed the same way as fetchKonnectConfigCached.
+				const cacheKey = `${cfg.region}:${cfg.controlPlaneId}`;
+				const cacheEntry = _cache.get(cacheKey);
+				let sorted: MarshalledRoute[];
+				if (cacheEntry?.marshalledByFlavor.has(resolvedFlavor)) {
+					sorted = cacheEntry.marshalledByFlavor.get(resolvedFlavor)!;
 				} else {
-					for (const p of paths) {
-						marshalled.push(marshalRoute({ ...r, paths: [p] } as typeof r, svc, resolvedFlavor));
+					const marshalled: MarshalledRoute[] = [];
+					for (const r of fetched.routes) {
+						const svc = r.service?.id ? fetched.services.get(r.service.id) : undefined;
+						const paths = r.paths ?? [];
+						if (paths.length <= 1) {
+							marshalled.push(marshalRoute(r, svc, resolvedFlavor));
+						} else {
+							for (const p of paths) {
+								marshalled.push(marshalRoute({ ...r, paths: [p] } as typeof r, svc, resolvedFlavor));
+							}
+						}
 					}
+					sorted = [...marshalled].sort(compareRoutes);
+					// Store in the cache entry for reuse within the same TTL window.
+					cacheEntry?.marshalledByFlavor.set(resolvedFlavor, sorted);
 				}
-			}
-			const sorted = [...marshalled].sort(compareRoutes);
 
-			// Normalise the path: strip query strings, fragments, and resolve dot-segments.
-			const normalizedPath = normalizePath(path);
+				// Normalise the path: strip query strings, fragments, and resolve dot-segments.
+				const normalizedPath = normalizePath(path);
 
-			const result = simulateRequest(sorted, {
-				method,
-				host: host ?? 'example.com',
-				path: normalizedPath,
-				// When headers is provided (even empty object), header constraints are
-				// evaluated strictly. When undefined, they are skipped.
-				headers: headers as Record<string, string> | undefined,
-				// L4 fields: only applied when the caller provides them.
-				// Undefined = skip the check (conservative / static-analysis mode).
-				sni,
-				sourceIp,
-				sourcePort,
-				destIp,
-				destPort,
-			});
+				const result = simulateRequest(sorted, {
+					method,
+					host: host ?? 'example.com',
+					path: normalizedPath,
+					// When headers is provided (even empty object), header constraints are
+					// evaluated strictly. When undefined, they are skipped.
+					headers: headers as Record<string, string> | undefined,
+					// L4 fields: only applied when the caller provides them.
+					// Undefined = skip the check (conservative / static-analysis mode).
+					sni,
+					sourceIp,
+					sourcePort,
+					destIp,
+					destPort,
+				});
 
-			return {
-				content: [
-					{
-						type: 'text',
-						text: JSON.stringify(
-							{
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify({
 								controlPlaneId: cfg.controlPlaneId,
 								routerFlavor: resolvedFlavor,
 								request: result.request,
@@ -406,13 +431,15 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 									name: mr.route.name,
 									paths: mr.route.paths,
 								})),
-							},
-							null,
-							2,
-						),
-					},
-				],
-			};
+							}),
+						},
+					],
+				};
+			} catch (err) {
+				let msg = err instanceof Error ? err.message : String(err);
+				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
+			}
 		},
 	);
 
@@ -427,28 +454,30 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			},
 		},
 		async ({ controlPlaneId, region }) => {
-			const cfg = resolveConfig({ controlPlaneId, region });
-			const fetched = await fetch(cfg);
+			try {
+				const cfg = resolveConfig({ controlPlaneId, region });
+				const fetched = await fetch(cfg);
 
-			return {
-				content: [
-					{
-						type: 'text',
-						text: JSON.stringify(
-							{
+				return {
+					content: [
+						{
+							type: 'text',
+							text: JSON.stringify({
 								controlPlaneId: cfg.controlPlaneId,
 								routerFlavor: fetched.routerFlavor,
 								totalRoutes: fetched.routes.length,
 								totalServices: fetched.services.size,
 								routes: fetched.routes,
 								services: Array.from(fetched.services.values()),
-							},
-							null,
-							2,
-						),
-					},
-				],
-			};
+							}),
+						},
+					],
+				};
+			} catch (err) {
+				let msg = err instanceof Error ? err.message : String(err);
+				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
+			}
 		},
 	);
 

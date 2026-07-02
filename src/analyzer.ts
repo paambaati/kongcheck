@@ -42,6 +42,12 @@ const SUSPICIOUS_REGEX_PATTERNS: Array<{
 	description: string;
 	/** Suggested fix template. `{path}` is replaced with the cleaned path stem. */
 	suggestion: (raw: string) => string;
+	/**
+	 * Optional severity override. Defaults to `'MEDIUM'`.
+	 * Use `'HIGH'` for patterns that introduce ReDoS risk or are otherwise
+	 * especially dangerous.
+	 */
+	severity?: Severity;
 }> = [
 	{
 		// ~/foo/* or ~/foo/bar/* — trailing `/*` is almost always a glob mistake.
@@ -92,6 +98,31 @@ const SUSPICIOUS_REGEX_PATTERNS: Array<{
 			'correctly match only the root path `/`. ' +
 			'Use the plain path `/` (no `~`) for a catch-all, or `~^/$` (anchored) to match only root.',
 		suggestion: (_raw: string) => '/',
+	},
+	{
+		// Nested quantifier: (group)[+*] — patterns like (a+)* or (/segment+)+
+		// are a classic source of catastrophic backtracking (ReDoS). Kong uses PCRE under the
+		// hood; on certain input strings these patterns can cause exponential match time and
+		// stall the Kong worker.
+		//
+		// Only the outer quantifiers `+` and `*` cause exponential backtracking.
+		// An outer `?` (zero-or-one) is NOT dangerous and must NOT be flagged — e.g.
+		// `(?:/.*)? ` is a common, safe optional-path suffix that should be allowed.
+		//
+		// Pattern: a capturing or non-capturing group that contains a quantifier (+, *, ?, {)
+		// and is itself followed by `+` or `*` (not `?`). Examples:
+		//   ~/api(/v[0-9]+)*$  →  (/v[0-9]+)* is a nested quantifier (ReDoS risk)
+		//   ~/paths(/[^/]+)+   →  (/[^/]+)+   is a nested quantifier (ReDoS risk)
+		//   ~/payments(?:/.*)?$ →  (?:/.*)?  outer ? → safe, NOT flagged
+		test: /\([^)]*[+*?{][^)]*\)[+*]/,
+		description:
+			'Nested quantifier detected: a group containing a quantifier (`+`, `*`, `?`, `{`) is ' +
+			'itself followed by `+` or `*`. This is a classic ReDoS (Regular Expression Denial of ' +
+			'Service) pattern. On crafted input strings, PCRE can take exponential time to evaluate ' +
+			'this match, stalling Kong workers.',
+		suggestion: (raw: string) =>
+			raw + ' (simplify: remove the inner quantifier or rewrite as a flat repetition, e.g. `(/[^/]+)+` → `(/[^/]*)+`)',
+		severity: 'HIGH',
 	},
 ];
 
@@ -285,6 +316,13 @@ export function analyzeRoutes(fetched: KonnectData, options: AnalyzeOptions = {}
 	// Sort once – highest priority first.
 	const sorted = [...marshalledRoutes].sort(compareRoutes);
 
+	// Stamp isUniversal on each route once, before the analysis passes.
+	// This avoids calling isUniversalMatcher() (3× UNIVERSAL_PROBE_PATHS simulations)
+	// once per pair in detectCollisions/detectSiblingOverlaps (which are O(n²)).
+	for (const mr of sorted) {
+		mr.isUniversal = isUniversalMatcher(mr);
+	}
+
 	const findings: Finding[] = [];
 
 	// Pass 1: suspicious regex linting (always runs; emits MEDIUM/HIGH findings
@@ -345,7 +383,7 @@ function lintUniversalMatchers(
 
 	for (const mr of routes) {
 		if (skipIds.has(mr.route.id)) continue;
-		if (!isUniversalMatcher(mr)) continue;
+		if (!mr.isUniversal) continue;
 
 		const paths = (mr.route.paths ?? []).join(', ') || '(no paths)';
 		findings.push({
@@ -380,7 +418,7 @@ function lintSuspiciousRegex(routes: MarshalledRoute[], flavor: RouterFlavor): F
 		// that compiles to a universal matcher (matches every probe path) but was
 		// not already caught by the pattern-list above. This catches patterns like
 		// `~.*` or `~.*$` that we haven't explicitly enumerated.
-		if (isUniversalMatcher(mr) && mr.parsedPaths.some((p) => p.kind === 'regex')) {
+		if (mr.isUniversal && mr.parsedPaths.some((p) => p.kind === 'regex')) {
 			const alreadyCaught = mr.parsedPaths.some(
 				(p) => p.kind === 'regex' && detectSuspiciousRegexIssues(p.raw).length > 0,
 			);
@@ -414,8 +452,16 @@ function lintSuspiciousRegex(routes: MarshalledRoute[], flavor: RouterFlavor): F
 			if (issues.length === 0) continue;
 
 			const fix = suggestRegexFix(p.raw);
+			// Use the highest severity among all matching patterns (default MEDIUM).
+			let pSeverity: Severity = 'MEDIUM';
+			for (const { test, severity } of SUSPICIOUS_REGEX_PATTERNS) {
+				if (test.test(p.raw) && severity === 'HIGH') {
+					pSeverity = 'HIGH';
+					break;
+				}
+			}
 			findings.push({
-				severity: 'MEDIUM',
+				severity: pSeverity,
 				type: 'suspicious_regex',
 				routerFlavor: flavor,
 				routes: [mr.route],
@@ -468,6 +514,8 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 	// Deduplicate findings by route-pair key to avoid repeating the same pair
 	// for many similar requests.
 	const seenPairs = new Set<string>();
+	// O(1) lookup map for augmenting existing findings with additional sample paths.
+	const findingByPair = new Map<string, Finding>();
 	const findings: Finding[] = [];
 
 	for (const req of candidates) {
@@ -481,7 +529,7 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 			// Skip: loser is a universal-match (intentional catch-all like path `/`
 			// or regex `~/?$`). Being shadowed by every more-specific route is the
 			// expected behaviour for a catch-all; flagging it generates O(n) noise.
-			if (isUniversalMatcher(loser)) continue;
+			if (loser.isUniversal) continue;
 
 			// Skip: loser is a proper path-segment ancestor of the winner
 			// (e.g. /chat vs /chat/history). Kong's max_uri_length tie-breaker
@@ -502,13 +550,7 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 			const pairKey = [winner.route.id, loser.route.id].sort().join('|');
 			if (seenPairs.has(pairKey)) {
 				// Already have a finding for this pair; add this sample to it.
-				const existing = findings.find((f) => {
-					const ids = f.routes
-						.map((r) => r.id)
-						.sort()
-						.join('|');
-					return ids === pairKey;
-				});
+				const existing = findingByPair.get(pairKey);
 				if (existing && !existing.samples.includes(req.path)) {
 					existing.samples.push(req.path);
 				}
@@ -523,7 +565,11 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 			// configurations, not just identical-path pairs.
 			const sniIpStrat = isSniIpStratified(winner, loser);
 			if (sniIpStrat !== false) {
-				if (includeInfo) findings.push(buildSniIpStratifiedFinding(winner, loser, req.path, flavor, sniIpStrat.reason));
+				if (includeInfo) {
+					const f = buildSniIpStratifiedFinding(winner, loser, req.path, flavor, sniIpStrat.reason);
+					findings.push(f);
+					findingByPair.set(pairKey, f);
+				}
 				continue;
 			}
 
@@ -533,21 +579,26 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 			if (haveIdenticalPaths(winner, loser)) {
 				const stratification = isHeaderStratified(winner, loser);
 				if (stratification === 'stratified') {
-					if (includeInfo) findings.push(buildHeaderStratifiedFinding(winner, loser, req.path, flavor));
+					if (includeInfo) {
+						const f = buildHeaderStratifiedFinding(winner, loser, req.path, flavor);
+						findings.push(f);
+						findingByPair.set(pairKey, f);
+					}
 					continue;
 				}
 				if (stratification === 'regex-opaque') {
-					findings.push(buildRegexHeaderOpaqueFinding(winner, loser, req.path, flavor));
-					seenPairs.add(pairKey);
+					const f = buildRegexHeaderOpaqueFinding(winner, loser, req.path, flavor);
+					findings.push(f);
+					findingByPair.set(pairKey, f);
 					continue;
 				}
 			}
 
 			const severity = classifyCollisionSeverity(winner, loser);
-			const reason = buildCollisionReason(winner, loser, req.path, flavor);
+			const reason = buildCollisionReason(winner, loser, req.path, flavor, result.explanation);
 			const suggestions = buildCollisionSuggestions(winner, loser);
 
-			findings.push({
+			const f: Finding = {
 				severity,
 				type: isShadowing(winner, loser) ? 'shadowing' : 'collision',
 				routerFlavor: flavor,
@@ -556,13 +607,14 @@ function detectCollisions(sorted: MarshalledRoute[], flavor: RouterFlavor, inclu
 				winnerId: winner.route.id,
 				reason,
 				suggestions,
-			});
+			};
+			findings.push(f);
+			findingByPair.set(pairKey, f);
 		}
 	}
 
 	return findings;
 }
-
 /**
  * Determines whether the relationship between a winning and a losing route
  * constitutes "shadowing" (winner can capture requests clearly intended for
@@ -587,11 +639,12 @@ function isShadowing(winner: MarshalledRoute, loser: MarshalledRoute): boolean {
  * Returns true when the two routes have exactly the same set of path strings
  * (order-independent). Used to detect duplicate routes and header-gated env
  * routing pairs.
+ *
+ * Uses the pre-computed `pathFingerprint` field from `marshalRoute` for O(1)
+ * comparison (avoids sorting + joining on every O(n²) call).
  */
 function haveIdenticalPaths(a: MarshalledRoute, b: MarshalledRoute): boolean {
-	const aPaths = (a.route.paths ?? []).slice().sort().join('|');
-	const bPaths = (b.route.paths ?? []).slice().sort().join('|');
-	return aPaths === bPaths;
+	return a.pathFingerprint === b.pathFingerprint;
 }
 
 /**
@@ -984,12 +1037,17 @@ function classifyCollisionSeverity(winner: MarshalledRoute, loser: MarshalledRou
 
 /**
  * Builds the human-readable reason chain for a collision finding.
+ *
+ * @param precomputedExplanation - Optional explanation lines already produced
+ *   by the `simulateRequest` call in the caller. When provided, re-simulation
+ *   is skipped; falls back to a fresh simulation only when absent.
  */
 function buildCollisionReason(
 	winner: MarshalledRoute,
 	loser: MarshalledRoute,
 	samplePath: string,
 	flavor: RouterFlavor,
+	precomputedExplanation?: string[],
 ): string[] {
 	const winName = winner.route.name ?? winner.route.id;
 	const loseName = loser.route.name ?? loser.route.id;
@@ -1025,13 +1083,16 @@ function buildCollisionReason(
 		}
 	}
 
-	// Explain tie-breaking.
-	const result = simulateRequest([winner, loser], {
-		method: 'GET',
-		host: 'example.com',
-		path: samplePath,
-	});
-	lines.push(...result.explanation);
+	if (precomputedExplanation && precomputedExplanation.length > 0) {
+		lines.push(...precomputedExplanation);
+	} else {
+		const result = simulateRequest([winner, loser], {
+			method: 'GET',
+			host: 'example.com',
+			path: samplePath,
+		});
+		lines.push(...result.explanation);
+	}
 
 	return lines;
 }
@@ -1100,7 +1161,7 @@ function detectSiblingOverlaps(
 			// Skip pairs where either route is a universal matcher (catch-all).
 			// A catch-all overlaps with every route by definition; flagging all
 			// those pairs would produce O(n) noise with no actionable insight.
-			if (isUniversalMatcher(a) || isUniversalMatcher(b)) continue;
+			if (a.isUniversal || b.isUniversal) continue;
 
 			// Skip: same-route pair (multi-path route split into multiple MarshalledRoutes).
 			if (a.route.id === b.route.id) continue;
