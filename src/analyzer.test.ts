@@ -578,17 +578,18 @@ describe('analyzeRoutes – regex_priority override within same service is LOW',
 });
 
 describe('analyzeRoutes – specific sub-route overriding same-service catch-all is LOW', () => {
-	// A longer, more-specific route (SSE endpoint) correctly overrides a shorter
-	// same-service catch-all. This is an intentional routing refinement.
+	// The more-specific SSE route (created earlier) overrides the shorter same-service
+	// catch-all via created_at tiebreaker (both are regex, max_uri_length=0, regex_priority=0).
+	// This is an intentional routing refinement.
 	const configWithServices: KonnectData = {
 		routes: [
 			route('r-sse', 'sse-route', ['~/proposal-pal-api/v2/api/v1/proposals/~*/stream'], {
 				service: { id: 'svc-ppa' },
-				created_at: 1_711_000_001,
+				created_at: 1_711_000_000,
 			}),
 			route('r-catchall', 'api-route', ['~/proposal-pal-api/v2/*'], {
 				service: { id: 'svc-ppa' },
-				created_at: 1_711_000_000,
+				created_at: 1_711_000_001,
 			}),
 		],
 		services: new Map([['svc-ppa', { id: 'svc-ppa', name: 'proposal-pal-api' }]]),

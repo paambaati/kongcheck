@@ -1030,9 +1030,29 @@ function classifyCollisionSeverity(winner: MarshalledRoute, loser: MarshalledRou
 	// The winner has a longer path pattern (max_uri_length tie-breaker), meaning
 	// it is a more-specific refinement route intentionally overriding the broader
 	// catch-all within the same service.
+	// For regex paths (max_uri_length is always 0 in Kong), we compare the
+	// regex source length as a specificity proxy.
 	if (winner.maxUriLength > loser.maxUriLength) return 'LOW';
 
+	const winSpecificity = maxRegexSpecificity(winner);
+	const loseSpecificity = maxRegexSpecificity(loser);
+	if (winSpecificity > loseSpecificity) return 'LOW';
+
 	return 'MEDIUM';
+
+/**
+ * Returns the maximum regex source length across all parsed paths for a route.
+ * Used as a specificity proxy for regex routes (max_uri_length is always 0 for
+ * regex paths in Kong, so we fall back to the pattern string length).
+ */
+function maxRegexSpecificity(mr: MarshalledRoute): number {
+	return mr.parsedPaths.reduce((max, p) => {
+		if (p.kind === 'regex' && p.regexSource) {
+			return Math.max(max, p.regexSource.length);
+		}
+		return max;
+	}, 0);
+}
 }
 
 /**
