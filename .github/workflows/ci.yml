@@ -38,7 +38,7 @@ jobs:
         run: bun run test:coverage
 
       - uses: codecov/codecov-action@v7
-        name: Upload coverage reports to Codecov  
+        name: Upload coverage reports to Codecov
         with:
           use_oidc: true
           directory: .coverage
