@@ -157,7 +157,13 @@ export function marshalRoute(
 	// max_uri_length: used as a tie-breaker – the route with the longest path
 	// pattern wins when regex_priority and header count are equal.
 	// Kong source: https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L514-L517 – max_uri_length field.
-	const maxUriLength = parsedPaths.reduce((max, p) => Math.max(max, p.raw.length), 0);
+	// Kong only counts non-regex (prefix) path lengths for max_uri_length.
+	// Regex paths (`~`-prefixed) do NOT contribute – they leave max_uri_length at 0.
+	// Kong source: https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L439-L449
+	const maxUriLength = parsedPaths.reduce((max, p) => {
+		if (p.kind === 'regex') return max;
+		return Math.max(max, p.raw.length);
+	}, 0);
 
 	// HAS_REGEX_URI submatch weight bit: true iff any path is a regex path.
 	// Kong source: https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L150 – MATCH_SUBRULES.HAS_REGEX_URI.

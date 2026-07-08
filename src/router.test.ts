@@ -222,13 +222,13 @@ describe('compareRoutes – Kong sort_routes tie-breaking (traditional.lua ~L681
 		).toBeLessThan(0);
 	});
 
-	it('between equal-priority regex routes, longer path pattern wins', () => {
-		const longer = makeRoute({ id: 'r1', paths: ['~/api/v1/users'], regex_priority: 0 });
-		const shorter = makeRoute({ id: 'r2', paths: ['~/api'], regex_priority: 0 });
+	it('between equal-priority regex routes, max_uri_length is 0 for both so created_at decides', () => {
+		const older = makeRoute({ id: 'r1', paths: ['~/api/v1/users'], regex_priority: 0, created_at: 1000 });
+		const newer = makeRoute({ id: 'r2', paths: ['~/api'], regex_priority: 0, created_at: 2000 });
 
 		expect(
-			compareRoutes(longer, shorter),
-			'Kong: max_uri_length tie-breaker – longer path wins over shorter',
+			compareRoutes(older, newer),
+			'Kong: regex paths do not contribute to max_uri_length → both are 0 → older wins by created_at',
 		).toBeLessThan(0);
 	});
 
@@ -258,9 +258,9 @@ describe('compareRoutes – Kong sort_routes tie-breaking (traditional.lua ~L681
 		expect(compareRoutes(a, b), 'Fully identical routes (by ordering criteria) should compare as equal').toBe(0);
 	});
 
-	it('~/payments/* beats ~/payments-v2/* when both have equal regex_priority (length tie-break)', () => {
-		// ~/payments/* is 7 chars; ~/payments-v2/* is 11 chars.
-		// So ~/payments-v2/* should actually WIN by length… let's verify that.
+	it('~/payments/* ties ~/payments-v2/* on max_uri_length (both regex → both 0), falls to created_at', () => {
+		// Both are regex paths → Kong sets max_uri_length = 0 for both.
+		// So length does NOT break the tie; created_at decides.
 		const payments = makeRoute({ id: 'r1', paths: ['~/payments/*'], regex_priority: 0, created_at: 1000 });
 		const paymentsV2 = makeRoute({
 			id: 'r2',
@@ -271,9 +271,8 @@ describe('compareRoutes – Kong sort_routes tie-breaking (traditional.lua ~L681
 
 		expect(
 			compareRoutes(paymentsV2, payments),
-			'~/payments-v2/* (11 chars) has a longer path than ~/payments/* (7 chars) ' +
-				'so ~/payments-v2/* wins by max_uri_length – but both still have the suspicious /* pattern',
-		).toBeLessThan(0);
+			'regex paths have max_uri_length=0, so both routes tie on all criteria including created_at (both 1000)',
+		).toBe(0);
 	});
 
 	it('~/payments/* beats ~/payments-v2/* when ~/payments/* was created earlier (same length-adjusted priority)', () => {
@@ -358,7 +357,7 @@ describe('simulateRequest – the motivating ~/payments/* vs ~/payments-v2/* exa
 		).toBeGreaterThanOrEqual(2);
 	});
 
-	it('~/payments-v2/* wins over ~/payments/* for /payments-v2/docs because it is longer (max_uri_length)', () => {
+	it('~/payments/* (earlier created_at) wins over ~/payments-v2/* for /payments-v2/docs (both regex, same regex_priority)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
@@ -366,8 +365,8 @@ describe('simulateRequest – the motivating ~/payments/* vs ~/payments-v2/* exa
 		});
 		expect(
 			result.winner?.route.name,
-			'~/payments-v2/* (11 chars) is longer than ~/payments/* (7 chars) so it wins by max_uri_length',
-		).toBe('payments-v2');
+			'regex paths have max_uri_length=0 in Kong, so the older (earlier created_at) route wins',
+		).toBe('payments');
 	});
 
 	it('~/payments/* still wins for /payments/something (correct routing)', () => {
@@ -379,14 +378,14 @@ describe('simulateRequest – the motivating ~/payments/* vs ~/payments-v2/* exa
 		expect(result.winner?.route.name, '~/payments/* should win for its own path /payments/something').toBe('payments');
 	});
 
-	it('the explanation mentions the reason ~/payments-v2/* wins', () => {
+	it('the explanation mentions the winning route (payments, because it was created earlier)', () => {
 		const result = simulateRequest(sorted, {
 			method: 'GET',
 			host: 'example.com',
 			path: '/payments-v2/docs',
 		});
 		const fullExplanation = result.explanation.join('\n');
-		expect(fullExplanation, 'The explanation should mention the route name that wins').toContain('payments-v2');
+		expect(fullExplanation, 'The explanation should mention the route name that wins').toContain('payments');
 	});
 
 	it('when ~/payments/* is older, it wins for a path matching only ~/payments/* (no collision for /payments/x)', () => {
@@ -475,11 +474,9 @@ describe('marshalRoute – derived fields', () => {
 		expect(mr.hasRegexPath, 'hasRegexPath should be false when no path starts with ~').toBe(false);
 	});
 
-	it('maxUriLength reflects the length of the longest raw path string', () => {
+	it('maxUriLength is 0 for regex-only paths (Kong: max_uri_length only counts non-regex paths)', () => {
 		const mr = makeRoute({ paths: ['~/short', '~/a/longer/pattern'] });
-		expect(mr.maxUriLength, 'maxUriLength must equal the length of the longest raw path string').toBe(
-			'~/a/longer/pattern'.length,
-		);
+		expect(mr.maxUriLength, 'maxUriLength must be 0 when all paths are regex').toBe(0);
 	});
 
 	it('parsedPaths contains one entry per path in route.paths', () => {
