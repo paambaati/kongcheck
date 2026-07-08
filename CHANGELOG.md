@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.6](https://github.com/paambaati/kongcheck/compare/v1.1.5...v1.1.6) (2026-07-08)
+
+
+### Bug Fixes
+
+* more accurate wildcard matching logic that mimics Kong more closely ([1730a86](https://github.com/paambaati/kongcheck/commit/1730a869ee05d012b2efc5884086ddbef531db38))
+* more accurate wildcard matching logic that mimics Kong more closely ([f92ea89](https://github.com/paambaati/kongcheck/commit/f92ea891e1142ee687f47ebd4e3300a45682def9))
+
 ## [1.1.5](https://github.com/paambaati/kongcheck/compare/v1.1.4...v1.1.5) (2026-07-02)
 
 
