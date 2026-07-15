@@ -1040,19 +1040,19 @@ function classifyCollisionSeverity(winner: MarshalledRoute, loser: MarshalledRou
 
 	return 'MEDIUM';
 
-/**
- * Returns the maximum regex source length across all parsed paths for a route.
- * Used as a specificity proxy for regex routes (max_uri_length is always 0 for
- * regex paths in Kong, so we fall back to the pattern string length).
- */
-function maxRegexSpecificity(mr: MarshalledRoute): number {
-	return mr.parsedPaths.reduce((max, p) => {
-		if (p.kind === 'regex' && p.regexSource) {
-			return Math.max(max, p.regexSource.length);
-		}
-		return max;
-	}, 0);
-}
+	/**
+	 * Returns the maximum regex source length across all parsed paths for a route.
+	 * Used as a specificity proxy for regex routes (max_uri_length is always 0 for
+	 * regex paths in Kong, so we fall back to the pattern string length).
+	 */
+	function maxRegexSpecificity(mr: MarshalledRoute): number {
+		return mr.parsedPaths.reduce((max, p) => {
+			if (p.kind === 'regex' && p.regexSource) {
+				return Math.max(max, p.regexSource.length);
+			}
+			return max;
+		}, 0);
+	}
 }
 
 /**
