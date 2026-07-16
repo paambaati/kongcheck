@@ -72,19 +72,19 @@ jobs:
         run: |
           mkdir -p dist
 
-          bun build --compile --target bun-darwin-arm64 \
+          bun build --compile --bytecode --minify --target bun-darwin-arm64 \
             --outfile dist/kongcheck-darwin-arm64 src/cli.ts
 
-          bun build --compile --target bun-darwin-x64 \
+          bun build --compile --bytecode --minify --target bun-darwin-x64 \
             --outfile dist/kongcheck-darwin-x64 src/cli.ts
 
-          bun build --compile --target bun-linux-x64 \
+          bun build --compile --bytecode --minify --target bun-linux-x64 \
             --outfile dist/kongcheck-linux-x64 src/cli.ts
 
-          bun build --compile --target bun-linux-arm64 \
+          bun build --compile --bytecode --minify --target bun-linux-arm64 \
             --outfile dist/kongcheck-linux-arm64 src/cli.ts
 
-          bun build --compile --target bun-windows-x64 \
+          bun build --compile --bytecode --minify --target bun-windows-x64 \
             --outfile dist/kongcheck-windows-x64.exe src/cli.ts
 
       # Upload binaries to the GitHub Release that release-please created.
