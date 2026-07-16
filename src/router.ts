@@ -211,9 +211,11 @@ export function marshalRoute(
 	// headerCount: number of distinct header-name constraints on the route.
 	// Used as the second sort tier in sort_routes (between submatch_weight and
 	// regex_priority). headers[0] is the Lua array length (count of entries).
+	// Kong filters out the "host" header when building headers_t, so only
+	// non-host headers count towards the sort priority.
 	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L378-L418 (marshal, builds headers_t)
 	// https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L686-L688 (sort, headers[0] comparison)
-	const headerCount = route.headers ? Object.keys(route.headers).length : 0;
+	const headerCount = route.headers ? Object.keys(route.headers).filter((h) => h.toLowerCase() !== 'host').length : 0;
 
 	// pathFingerprint: sorted pipe-joined path set used for O(1) identical-path
 	// comparison across the entire analysis pass.
@@ -315,11 +317,11 @@ export function compareRoutes(a: MarshalledRoute, b: MarshalledRoute): number {
 	if (a.maxUriLength !== b.maxUriLength) return b.maxUriLength - a.maxUriLength; // higher first
 
 	// 5. created_at – earlier creation wins.
-	//    Kong: r1.route.created_at < r2.route.created_at
+	//    Kong: only compared when BOTH routes have non-nil created_at.
 	//    https://github.com/Kong/kong/blob/2ffd3b1/kong/router/traditional.lua#L706-L708
-	const aCreated = a.route.created_at ?? 0;
-	const bCreated = b.route.created_at ?? 0;
-	if (aCreated !== bCreated) return aCreated - bCreated; // lower first (earlier wins)
+	const aCreated = a.route.created_at;
+	const bCreated = b.route.created_at;
+	if (aCreated != null && bCreated != null && aCreated !== bCreated) return aCreated - bCreated; // lower first (earlier wins)
 
 	return 0;
 }
@@ -763,7 +765,10 @@ export function matchRoute(mr: MarshalledRoute, request: SimRequest): boolean {
 	}
 
 	// Path check – any path pattern matching is sufficient.
-	return mr.parsedPaths.some((p) => matchPath(p, request.path));
+	// When the route has NO path constraints, Kong treats it as matching any URI
+	// (the MATCH_RULES.URI bit is simply absent from match_rules).
+	if (mr.parsedPaths.length > 0 && !mr.parsedPaths.some((p) => matchPath(p, request.path))) return false;
+	return true;
 }
 
 /**
@@ -881,10 +886,10 @@ function explainPairOrdering(winner: MarshalledRoute, loser: MarshalledRoute): s
 	if (winner.maxUriLength > loser.maxUriLength)
 		return `longer path pattern (${winner.maxUriLength} chars > ${loser.maxUriLength} chars)`;
 
-	// 5. created_at.
-	const wc = winner.route.created_at ?? 0;
-	const lc = loser.route.created_at ?? 0;
-	if (wc < lc)
+	// 5. created_at (only compared when BOTH are non-nil, matching Kong).
+	const wc = winner.route.created_at;
+	const lc = loser.route.created_at;
+	if (wc != null && lc != null && wc < lc)
 		return `earlier created_at (${new Date(wc * 1000).toISOString()} < ${new Date(lc * 1000).toISOString()})`;
 
 	return 'routes are equal by all ordering criteria (non-deterministic)';

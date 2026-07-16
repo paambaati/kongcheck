@@ -258,6 +258,26 @@ describe('compareRoutes – Kong sort_routes tie-breaking (traditional.lua ~L681
 		expect(compareRoutes(a, b), 'Fully identical routes (by ordering criteria) should compare as equal').toBe(0);
 	});
 
+	it('created_at is NOT compared when one route has nil created_at (Kong: only compares when both are non-nil)', () => {
+		// Kong L706: "if r1.route.created_at ~= nil and r2.route.created_at ~= nil"
+		// When one route is missing created_at, the created_at tier is skipped entirely.
+		const withCreated = makeRoute({ id: 'r-older', paths: ['/api'], created_at: 1000 });
+		const withoutCreated = makeRoute({ id: 'r-missing', paths: ['/api'] }); // no created_at
+		expect(
+			compareRoutes(withCreated, withoutCreated),
+			'When route B has no created_at, the created_at tier must be skipped — routes are equal by all compared criteria',
+		).toBe(0);
+	});
+
+	it('created_at is NOT compared when both routes have nil created_at', () => {
+		const a = makeRoute({ id: 'r-a', paths: ['/api'] }); // no created_at
+		const b = makeRoute({ id: 'r-b', paths: ['/api'] }); // no created_at
+		expect(
+			compareRoutes(a, b),
+			'When both routes lack created_at, the sort falls through all tiers and returns 0',
+		).toBe(0);
+	});
+
 	it('~/payments/* ties ~/payments-v2/* on max_uri_length (both regex → both 0), falls to created_at', () => {
 		// Both are regex paths → Kong sets max_uri_length = 0 for both.
 		// So length does NOT break the tie; created_at decides.
@@ -323,6 +343,57 @@ describe('matchRoute – method and host filtering', () => {
 			matchRoute(mr, { method: 'GET', host: 'sub.example.com', path: '/api' }),
 			'A wildcard host *.example.com should match any subdomain',
 		).toBe(true);
+	});
+});
+
+describe('matchRoute – route with no path constraints matches any URI (Kong: MATCH_RULES.URI bit absent)', () => {
+	it('route with empty paths array matches any request path', () => {
+		const mr = makeRoute({ paths: [] });
+		expect(
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/any/random/path' }),
+			'A route with no path constraints (empty paths array) must match any URI',
+		).toBe(true);
+		expect(
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/completely/different' }),
+			'Empty paths route should still match another different URI',
+		).toBe(true);
+		expect(
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/' }),
+			'Empty paths route must match the root path as well',
+		).toBe(true);
+	});
+
+	it('route with no paths property at all (undefined) matches any request path', () => {
+		const mr = makeRoute({ paths: [] });
+		expect(
+			matchRoute(mr, { method: 'POST', host: 'any-host.com', path: '/some/deeply/nested/path' }),
+			'A route with no path constraints must match regardless of path depth',
+		).toBe(true);
+	});
+
+	it('route with explicit path only matches requests beginning with that prefix', () => {
+		const mr = makeRoute({ paths: ['/api'] });
+		expect(
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/api/v1/users' }),
+			'A route with a path constraint must match a request whose URI starts with that prefix',
+		).toBe(true);
+		expect(
+			matchRoute(mr, { method: 'GET', host: 'example.com', path: '/other' }),
+			'A route with a path constraint must not match a request with a different URI prefix',
+		).toBe(false);
+	});
+
+	it('route with empty paths beats route with non-empty paths in sort_routes when no path is a deciding factor', () => {
+		// Both routes have identical ordering criteria except one has empty paths.
+		// Empty-paths routes have maxUriLength = 0 and no hasRegexPath, so they tie
+		// on all tiers with a route that also has no regex/hosts/headers.
+		const emptyPaths = makeRoute({ id: 'r-empty', paths: [], created_at: 1000 });
+		const withPath = makeRoute({ id: 'r-path', paths: ['/api'], created_at: 2000 });
+		// maxUriLength: empty=0, /api=4 → /api wins on tier 4 (longer wins)
+		expect(
+			compareRoutes(withPath, emptyPaths),
+			'A prefix route with /api (maxUriLength=4) beats an empty-paths route (maxUriLength=0) on max_uri_length',
+		).toBeLessThan(0);
 	});
 });
 
@@ -482,6 +553,37 @@ describe('marshalRoute – derived fields', () => {
 	it('parsedPaths contains one entry per path in route.paths', () => {
 		const mr = makeRoute({ paths: ['/a', '/b', '~/c/.*'] });
 		expect(mr.parsedPaths.length, 'parsedPaths should have one entry per path in route.paths').toBe(3);
+	});
+
+	it('headerCount excludes the host header (Kong filters "host" when building headers_t)', () => {
+		const route: KongRoute = {
+			id: 'r-filter-host',
+			paths: ['/api'],
+			headers: { host: ['api.example.com'], 'x-env': ['prod'], 'x-tenant': ['acme'] },
+		};
+		const mr = marshalRoute(route, undefined, 'traditional');
+		expect(
+			mr.headerCount,
+			'headerCount must not count the "host" header — only x-env and x-tenant should count (2 distinct headers)',
+		).toBe(2);
+	});
+
+	it('headerCount is 0 when the only header is "host"', () => {
+		const route: KongRoute = {
+			id: 'r-only-host',
+			paths: ['/api'],
+			headers: { host: ['api.example.com'] },
+		};
+		const mr = marshalRoute(route, undefined, 'traditional');
+		expect(
+			mr.headerCount,
+			'headerCount must be 0 when the only header constraint is "host" — Kong excludes host from headers_t',
+		).toBe(0);
+	});
+
+	it('headerCount is 0 when there are no header constraints', () => {
+		const mr = makeRoute({ paths: ['/api'] });
+		expect(mr.headerCount, 'headerCount must be 0 for routes with no headers constraint').toBe(0);
 	});
 });
 
@@ -681,6 +783,23 @@ describe('compareRoutes – header count sort tier (sort_routes L686–L688)', (
 			compareRoutes(mrWith, mrNo),
 			'A header-constrained route has higher priority than an unconstrained route at the same path',
 		).toBeLessThan(0);
+	});
+
+	it('host header is excluded from headerCount so it does NOT boost sort priority (Kong filters host from headers_t)', () => {
+		const onlyHost: KongRoute = {
+			id: 'r-only-host',
+			paths: ['/api'],
+			headers: { host: ['api.example.com'] },
+		};
+		const noHeaders: KongRoute = { id: 'r-no-headers', paths: ['/api'] };
+		const mrHost = marshalRoute(onlyHost, undefined, 'traditional');
+		const mrNo = marshalRoute(noHeaders, undefined, 'traditional');
+
+		expect(mrHost.headerCount, 'A route with only a "host" header constraint must have headerCount=0').toBe(0);
+		expect(
+			compareRoutes(mrHost, mrNo),
+			'host header is excluded from headerCount, so route with only "host" header ties with no-headers route at the header-count tier',
+		).toBe(0);
 	});
 });
 
