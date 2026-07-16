@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/paambaati/kongcheck/compare/v1.1.7...v1.2.0) (2026-07-16)
+
+
+### Features
+
+* **perf:** improve startup times by compiling bytecode ([57eeb65](https://github.com/paambaati/kongcheck/commit/57eeb652671f29c1bc8b86d82c9a59e2e773caf7))
+
 ## [1.1.7](https://github.com/paambaati/kongcheck/compare/v1.1.6...v1.1.7) (2026-07-16)
 
 
