@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.7](https://github.com/paambaati/kongcheck/compare/v1.1.6...v1.1.7) (2026-07-16)
+
+
+### Bug Fixes
+
+* more edge-case fixes ([8edef2c](https://github.com/paambaati/kongcheck/commit/8edef2c02a89074ae551bf0b442a6bc5a873d7c7))
+
 ## [1.1.6](https://github.com/paambaati/kongcheck/compare/v1.1.5...v1.1.6) (2026-07-08)
 
 
