@@ -27,7 +27,7 @@
 		"test": "vitest run src/",
 		"test:coverage": "vitest run src/ --coverage",
 		"typecheck": "tsc --noEmit",
-		"build": "perry compile src/cli.ts -o dist/kongcheck",
+		"build": "bun build --compile --minify --outfile dist/kongcheck src/cli.ts",
 		"lint": "oxlint",
 		"lint:fix": "oxlint --fix",
 		"format": "oxfmt",
@@ -55,28 +55,8 @@
 			{ "label": "generate version", "command": "node scripts/generate-version.js" }
 		],
 		"compilePackages": ["cac", "valibot", "@modelcontextprotocol/sdk", "ajv", "ajv-formats", "fast-deep-equal", "fast-uri", "json-schema-traverse", "zod", "zod-to-json-schema"],
-		"nativeLibrary": {
-			"sources": ["perry-stub.c"],
-			"functions": [
-				{ "name": "js_ext_http_agent_dispatch_method", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_agent_dispatch_property", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_agent_dispatch_property_set", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_agent_is_handle", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_client_incoming_message_is_handle", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_client_incoming_message_set_encoding", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_client_inflight", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_client_request_dispatch_method", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_client_request_dispatch_property", "params": [], "returns": "void" },
-				{ "name": "js_ext_http_client_request_is_handle", "params": [], "returns": "void" },
-				{ "name": "js_http_has_pending", "params": [], "returns": "void" },
-				{ "name": "js_http_incoming_message_pipe", "params": [], "returns": "void" },
-				{ "name": "js_http_is_incoming_message", "params": [], "returns": "void" },
-				{ "name": "js_http_response_trailers", "params": [], "returns": "void" }
-			]
-		},
 		"allow": {
-			"compilePackages": ["*"],
-			"nativeLibrary": ["*"]
+			"compilePackages": ["*"]
 		}
 	}
 }
