@@ -11,6 +11,7 @@
  * @see https://developer.konghq.com/api/konnect/control-planes-config/v2/
  */
 
+import fs from 'node:fs/promises';
 import type { KongRoute, KongService, KonnectConfig, KonnectData, RouterFlavor } from './types.ts';
 
 /** Maps short region codes to their Konnect API base URLs. */
@@ -151,7 +152,7 @@ async function fetchPage<T>(url: string, token: string, signal?: AbortSignal): P
 		// Compute delay: honour Retry-After header; fall back to exponential backoff.
 		// Exponential schedule: 1 s (attempt 0), 2 s (attempt 1), 4 s (attempt 2).
 		const delayMs = parseRetryAfterMs(response.headers.get('Retry-After')) ?? 1000 * Math.pow(2, attempt);
-		await Bun.sleep(delayMs);
+		await new Promise((resolve) => setTimeout(resolve, delayMs));
 	}
 
 	// TypeScript requires an unreachable return — the loop always throws first.
@@ -438,7 +439,7 @@ export interface LocalConfigDump {
  * const data = await loadLocalConfig("./routes-dump.json");
  */
 export async function loadLocalConfig(filePath: string): Promise<KonnectData> {
-	const text = await Bun.file(filePath).text();
+	const text = await fs.readFile(filePath, 'utf-8');
 	const parsed: LocalConfigDump = JSON.parse(text);
 
 	const services = new Map<string, KongService>();
