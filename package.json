@@ -36,7 +36,8 @@
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "1.30.0",
 		"cac": "7.0.0",
-		"zod": "4.4.3"
+		"valibot": "1.4.2",
+		"zod": "^3.23.8"
 	},
 	"devDependencies": {
 		"@perryts/perry": "0.5.1220",
@@ -53,7 +54,7 @@
 		"codegen": [
 			{ "label": "generate version", "command": "node scripts/generate-version.js" }
 		],
-		"compilePackages": ["cac", "zod", "@modelcontextprotocol/sdk", "ajv", "ajv-formats", "zod-to-json-schema", "fast-deep-equal", "fast-uri", "json-schema-traverse"],
+		"compilePackages": ["cac", "valibot", "@modelcontextprotocol/sdk", "ajv", "ajv-formats", "fast-deep-equal", "fast-uri", "json-schema-traverse", "zod", "zod-to-json-schema"],
 		"nativeLibrary": {
 			"sources": ["perry-stub.c"],
 			"functions": [

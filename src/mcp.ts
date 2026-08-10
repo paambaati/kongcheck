@@ -15,9 +15,13 @@
  *   - region is also optional per-call, falling back to KONNECT_REGION or "us".
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import z from 'zod';
+import {
+	ListToolsRequestSchema,
+	CallToolRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
+import * as v from 'valibot';
 
 import { name, version } from './generated-version.ts';
 import { analyzeRoutes } from './analyzer.ts';
@@ -27,77 +31,71 @@ import { compareRoutes, marshalRoute, simulateRequest } from './router.ts';
 import type { KonnectData, KonnectConfig, MarshalledRoute, RouterFlavor } from './types.ts';
 import { normalizePath } from './utils.ts';
 
-/** Fields common to every tool that needs a live Konnect connection. */
-const konnectParams = {
-	controlPlaneId: z
-		.string()
-		.uuid()
-		.optional()
-		.describe(
-			'UUID of the Konnect control plane to inspect. ' +
-				'Falls back to the KONNECT_CONTROL_PLANE_ID environment variable.',
-		),
-	region: z
-		.enum(Object.keys(REGION_MAP))
-		.optional()
-		.describe('Konnect region. Defaults to KONNECT_REGION environment variable or "us".'),
-};
+// ---------------------------------------------------------------------------
+// Valibot schemas for tool argument validation
+// ---------------------------------------------------------------------------
 
-const flavorParam = z
-	.enum(['traditional', 'traditional_compatible', 'expressions'])
-	.optional()
-	.describe('Override router flavor. Auto-detected from Konnect when omitted.');
+const AnalyzeRoutesSchema = v.object({
+	controlPlaneId: v.optional(v.pipe(v.string(), v.uuid())),
+	region: v.optional(v.picklist(['us', 'eu', 'au', 'me', 'in', 'sg'])),
+	flavor: v.optional(v.picklist(['traditional', 'traditional_compatible', 'expressions'])),
+	includeInfo: v.optional(v.boolean(), false),
+	filter: v.optional(v.array(
+		v.object({
+			key: v.picklist(['path', 'name', 'service', 'tag', 'id']),
+			value: v.string(),
+		})
+	)),
+});
 
-const FILTER_KEYS = ['path', 'name', 'service', 'tag', 'id'] as const satisfies FilterKey[];
+const GetCollisionsSchema = v.object({
+	controlPlaneId: v.optional(v.pipe(v.string(), v.uuid())),
+	region: v.optional(v.picklist(['us', 'eu', 'au', 'me', 'in', 'sg'])),
+	flavor: v.optional(v.picklist(['traditional', 'traditional_compatible', 'expressions'])),
+	filter: v.optional(v.array(
+		v.object({
+			key: v.picklist(['path', 'name', 'service', 'tag', 'id']),
+			value: v.string(),
+		})
+	)),
+});
 
-const filterParam = z
-	.array(
-		z.object({
-			key: z.enum(FILTER_KEYS).describe('Attribute to filter on.'),
-			value: z.string().describe('Substring to match against (case-insensitive).'),
-		}),
-	)
-	.optional()
-	.describe(
-		'Filter findings to routes matching all given key/value pairs (ANDed). ' +
-			'Supported keys: path, name, service, tag, id.',
-	);
+const ExplainRequestSchema = v.object({
+	controlPlaneId: v.optional(v.pipe(v.string(), v.uuid())),
+	region: v.optional(v.picklist(['us', 'eu', 'au', 'me', 'in', 'sg'])),
+	flavor: v.optional(v.picklist(['traditional', 'traditional_compatible', 'expressions'])),
+	method: v.optional(v.string(), 'GET'),
+	host: v.optional(v.string()),
+	path: v.string(),
+	headers: v.optional(v.record(v.string(), v.string())),
+	sni: v.optional(v.string()),
+	sourceIp: v.optional(v.string()),
+	sourcePort: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(65535))),
+	destIp: v.optional(v.string()),
+	destPort: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(65535))),
+});
+
+const GetRouteConfigSchema = v.object({
+	controlPlaneId: v.optional(v.pipe(v.string(), v.uuid())),
+	region: v.optional(v.picklist(['us', 'eu', 'au', 'me', 'in', 'sg'])),
+});
+
+// ---------------------------------------------------------------------------
 
 /**
- * In-memory config cache (only for MCP mode)/
+ * In-memory config cache (only for MCP mode)
  */
 interface CacheEntry {
 	data: KonnectData;
 	fetchedAt: number;
-	/**
-	 * Lazily populated cache of marshalled+sorted routes per router flavor.
-	 *
-	 * `explain_request` marshals routes on the first call for a given flavor
-	 * and stores the result here, so subsequent calls with the same flavor
-	 * within the TTL window skip the marshal+sort pass.
-	 *
-	 * Cleared automatically whenever the data entry is evicted or overwritten.
-	 */
 	marshalledByFlavor: Map<RouterFlavor, MarshalledRoute[]>;
 }
 
-/**
- * Fetches a Konnect control-plane config, returning a cached copy when one
- * exists and is still within the TTL.
- *
- * The cache is intentionally module-level so it survives across MCP tool
- * calls within the same server process. CLI commands never call this function,
- * so they are unaffected.
- *
- * Pass `cacheTtlMs = 0` to disable caching entirely.
- */
-/** @internal Exported for testing only. */
 export const _cache = new Map<string, CacheEntry>();
 
 export async function fetchKonnectConfigCached(
 	cfg: KonnectConfig,
 	cacheTtlMs: number,
-	/** @internal Override the fetch implementation (used in tests). */
 	_fetchFn: (cfg: KonnectConfig) => Promise<KonnectData> = fetchKonnectConfig,
 ): Promise<KonnectData> {
 	if (cacheTtlMs > 0) {
@@ -109,8 +107,6 @@ export async function fetchKonnectConfigCached(
 		}
 		const data = await _fetchFn(cfg);
 		_cache.set(key, { data, fetchedAt: now, marshalledByFlavor: new Map() });
-		// Evict any other entries that have already expired so stale data
-		// doesn't linger in memory after its TTL window closes.
 		for (const [k, e] of _cache) {
 			if (k !== key && now - e.fetchedAt >= cacheTtlMs) _cache.delete(k);
 		}
@@ -119,13 +115,6 @@ export async function fetchKonnectConfigCached(
 	return _fetchFn(cfg);
 }
 
-// ---------------------------------------------------------------------------
-
-/**
- * Resolves the Konnect connection config from per-call params and env vars.
- * Throws a descriptive error if the token or control-plane-id is missing.
- */
-/** @internal Exported for testing only. */
 export function resolveConfig(params: { controlPlaneId?: string; region?: string }): KonnectConfig {
 	const token = process.env['KONNECT_TOKEN'];
 	if (!token) {
@@ -147,52 +136,150 @@ export function resolveConfig(params: { controlPlaneId?: string; region?: string
 	return { token, controlPlaneId, region };
 }
 
-/**
- * Connects the MCP server to the stdio transport and begins serving requests.
- *
- * @param cacheTtlMs - How long (in milliseconds) to cache fetched Konnect
- *   config per control-plane within a single server session. Pass `0` to
- *   disable caching entirely. Defaults to 60,000 ms (60 seconds).
- */
 export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 	const fetch = (cfg: KonnectConfig) => fetchKonnectConfigCached(cfg, cacheTtlMs);
 
-	const server = new McpServer(
+	const server = new Server(
 		{ name, version },
 		{
-			instructions:
-				'kongcheck audits Kong Konnect route configurations for collisions, ' +
-				'shadowing, and suspicious regex patterns. Use analyze_routes for a full ' +
-				'audit, get_collisions for a focused collision report, explain_request to ' +
-				'simulate a specific HTTP or TCP/TLS stream request, and get_route_config ' +
-				'to inspect the raw route/service data.',
-		},
+			capabilities: {
+				tools: {}
+			}
+		}
 	);
 
-	server.registerTool(
-		'analyze_routes',
-		{
-			description:
-				'Run a full four-pass audit of a Konnect control plane: suspicious regex paths, ' +
-				'route collisions, shadowing, and (optionally) universal catch-all routes.',
-			inputSchema: {
-				...konnectParams,
-				flavor: flavorParam,
-				includeInfo: z
-					.boolean()
-					.optional()
-					.default(false)
-					.describe(
-						'Include INFO-level findings. INFO covers: universal catch-all routes that ' +
-							'match every request, and route pairs that are structurally stratified ' +
-							'(mutually exclusive by SNI, source/destination IP, or protocol family) ' +
-							'so a collision is impossible. Default: false.',
-					),
-				filter: filterParam,
-			},
-		},
-		async ({ controlPlaneId, region, flavor, includeInfo, filter }) => {
-			try {
+	server.setRequestHandler(ListToolsRequestSchema, async () => {
+		return {
+			tools: [
+				{
+					name: 'analyze_routes',
+					description:
+						'Run a full four-pass audit of a Konnect control plane: suspicious regex paths, ' +
+						'route collisions, shadowing, and (optionally) universal catch-all routes.',
+					inputSchema: {
+						type: 'object',
+						properties: {
+							controlPlaneId: {
+								type: 'string',
+								description: 'UUID of the Konnect control plane to inspect. Falls back to the KONNECT_CONTROL_PLANE_ID environment variable.'
+							},
+							region: {
+								type: 'string',
+								enum: ['us', 'eu', 'au', 'me', 'in', 'sg'],
+								description: 'Konnect region. Defaults to KONNECT_REGION environment variable or "us".'
+							},
+							flavor: {
+								type: 'string',
+								enum: ['traditional', 'traditional_compatible', 'expressions'],
+								description: 'Override router flavor. Auto-detected from Konnect when omitted.'
+							},
+							includeInfo: {
+								type: 'boolean',
+								description: 'Include INFO-level findings (universal catch-all, stratified route pairs). Default: false.'
+							},
+							filter: {
+								type: 'array',
+								description: 'Filter findings to routes matching all given key/value pairs (ANDed).',
+								items: {
+									type: 'object',
+									properties: {
+										key: { type: 'string', enum: ['path', 'name', 'service', 'tag', 'id'] },
+										value: { type: 'string' }
+									},
+									required: ['key', 'value']
+								}
+							}
+						}
+					}
+				},
+				{
+					name: 'get_collisions',
+					description:
+						'Return only shadowing and collision findings for a Konnect control plane. Excludes suspicious-regex findings.',
+					inputSchema: {
+						type: 'object',
+						properties: {
+							controlPlaneId: {
+								type: 'string',
+								description: 'UUID of the Konnect control plane to inspect. Falls back to the KONNECT_CONTROL_PLANE_ID environment variable.'
+							},
+							region: {
+								type: 'string',
+								enum: ['us', 'eu', 'au', 'me', 'in', 'sg'],
+								description: 'Konnect region. Defaults to KONNECT_REGION environment variable or "us".'
+							},
+							flavor: {
+								type: 'string',
+								enum: ['traditional', 'traditional_compatible', 'expressions'],
+								description: 'Override router flavor. Auto-detected from Konnect when omitted.'
+							},
+							filter: {
+								type: 'array',
+								description: 'Filter findings to routes matching all given key/value pairs (ANDed).',
+								items: {
+									type: 'object',
+									properties: {
+										key: { type: 'string', enum: ['path', 'name', 'service', 'tag', 'id'] },
+										value: { type: 'string' }
+									},
+									required: ['key', 'value']
+								}
+							}
+						}
+					}
+				},
+				{
+					name: 'explain_request',
+					description:
+						'Simulate a specific HTTP or TCP/TLS stream request against a Konnect control plane and return the winning route with a step-by-step explanation. ' +
+						'When an L4 field is omitted, the corresponding constraint is skipped.',
+					inputSchema: {
+						type: 'object',
+						properties: {
+							controlPlaneId: { type: 'string' },
+							region: { type: 'string', enum: ['us', 'eu', 'au', 'me', 'in', 'sg'] },
+							flavor: { type: 'string', enum: ['traditional', 'traditional_compatible', 'expressions'] },
+							method: { type: 'string', description: 'HTTP method, e.g. "GET". Default: "GET".' },
+							host: { type: 'string', description: 'Host header value, e.g. "api.example.com".' },
+							path: { type: 'string', description: 'Request path, e.g. "/api/v1/users".' },
+							headers: { type: 'object', description: 'Optional request headers as a key/value object.' },
+							sni: { type: 'string', description: 'TLS SNI value for stream route simulation.' },
+							sourceIp: { type: 'string', description: 'Source IP address of the connection.' },
+							sourcePort: { type: 'number', minimum: 1, maximum: 65535, description: 'Source TCP/UDP port.' },
+							destIp: { type: 'string', description: 'Destination IP address of the connection.' },
+							destPort: { type: 'number', minimum: 1, maximum: 65535, description: 'Destination TCP/UDP port.' }
+						},
+						required: ['path']
+					}
+				},
+				{
+					name: 'get_route_config',
+					description:
+						'Fetch the raw routes and services from a Konnect control plane as structured data. Useful when the agent needs to inspect raw configs directly.',
+					inputSchema: {
+						type: 'object',
+						properties: {
+							controlPlaneId: { type: 'string' },
+							region: { type: 'string', enum: ['us', 'eu', 'au', 'me', 'in', 'sg'] }
+						}
+					}
+				}
+			]
+		};
+	});
+
+	server.setRequestHandler(CallToolRequestSchema, async (request) => {
+		const { name: toolName, arguments: args } = request.params;
+
+		try {
+			if (toolName === 'analyze_routes') {
+				const parseResult = v.safeParse(AnalyzeRoutesSchema, args);
+				if (!parseResult.success) {
+					const errorMsg = parseResult.issues.map(i => `${i.path?.[0]?.key ?? 'arg'}: ${i.message}`).join(', ');
+					return { isError: true, content: [{ type: 'text', text: `Invalid arguments: ${errorMsg}` }] };
+				}
+				const { controlPlaneId, region, flavor, includeInfo, filter } = parseResult.output;
+
 				const cfg = resolveConfig({ controlPlaneId, region });
 				const fetched = await fetch(cfg);
 				const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
@@ -220,28 +307,16 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 						},
 					],
 				};
-			} catch (err) {
-				let msg = err instanceof Error ? err.message : String(err);
-				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
 			}
-		},
-	);
 
-	server.registerTool(
-		'get_collisions',
-		{
-			description:
-				'Return only shadowing and collision findings for a Konnect control plane. ' +
-				'Excludes suspicious-regex findings.',
-			inputSchema: {
-				...konnectParams,
-				flavor: flavorParam,
-				filter: filterParam,
-			},
-		},
-		async ({ controlPlaneId, region, flavor, filter }) => {
-			try {
+			if (toolName === 'get_collisions') {
+				const parseResult = v.safeParse(GetCollisionsSchema, args);
+				if (!parseResult.success) {
+					const errorMsg = parseResult.issues.map(i => `${i.path?.[0]?.key ?? 'arg'}: ${i.message}`).join(', ');
+					return { isError: true, content: [{ type: 'text', text: `Invalid arguments: ${errorMsg}` }] };
+				}
+				const { controlPlaneId, region, flavor, filter } = parseResult.output;
+
 				const cfg = resolveConfig({ controlPlaneId, region });
 				const fetched = await fetch(cfg);
 				const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
@@ -264,108 +339,33 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 						},
 					],
 				};
-			} catch (err) {
-				let msg = err instanceof Error ? err.message : String(err);
-				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
 			}
-		},
-	);
 
-	server.registerTool(
-		'explain_request',
-		{
-			description:
-				'Simulate a specific HTTP or TCP/TLS stream request against a Konnect control ' +
-				'plane and return the winning route with a step-by-step explanation of why it won. ' +
-				'For stream routes, supply sni / sourceIp / sourcePort / destIp / destPort as needed. ' +
-				'When an L4 field is omitted, the corresponding route constraint is skipped ' +
-				'(conservative mode: every route is a candidate). ' +
-				'The path is normalised before matching: query strings and fragments are stripped ' +
-				'and dot-segments are resolved.',
-			inputSchema: {
-				...konnectParams,
-				flavor: flavorParam,
-				method: z.string().default('GET').describe('HTTP method, e.g. "GET".'),
-				host: z
-					.string()
-					.optional()
-					.describe(
-						'Host header value, e.g. "api.example.com". ' +
-							'Defaults to "example.com" when omitted (sufficient for path-only matching).',
-					),
-				path: z
-					.string()
-					.describe('Request path, e.g. "/api/v1/users". Query strings and fragments are stripped automatically.'),
-				headers: z
-					.record(z.string(), z.string())
-					.optional()
-					.describe(
-						'Optional request headers as a key/value object, e.g. {"x-env": "prod"}. ' +
-							'When provided, routes with header constraints are evaluated strictly. ' +
-							'When omitted, header constraints are skipped (every route is a candidate).',
-					),
-				sni: z
-					.string()
-					.optional()
-					.describe(
-						'TLS SNI value for stream route simulation, e.g. "api.example.com". ' +
-							'When provided, routes with snis constraints are evaluated strictly.',
-					),
-				sourceIp: z
-					.string()
-					.optional()
-					.describe(
-						'Source IP address of the connection, e.g. "10.0.1.5". IPv4 and IPv6 are ' +
-							'accepted; CIDR matching applies to the route constraints. When provided, ' +
-							'sources constraints on routes are evaluated strictly.',
-					),
-				sourcePort: z
-					.number()
-					.int()
-					.min(1)
-					.max(65535)
-					.optional()
-					.describe(
-						'Source TCP/UDP port of the connection, e.g. 54321. Evaluated only when sourceIp is also provided.',
-					),
-				destIp: z
-					.string()
-					.optional()
-					.describe(
-						'Destination IP address of the connection, e.g. "192.168.1.10". When provided, ' +
-							'destinations constraints on routes are evaluated strictly.',
-					),
-				destPort: z
-					.number()
-					.int()
-					.min(1)
-					.max(65535)
-					.optional()
-					.describe('Destination TCP/UDP port, e.g. 443. Evaluated only when destIp is also provided.'),
-			},
-		},
-		async ({
-			controlPlaneId,
-			region,
-			flavor,
-			method,
-			host,
-			path,
-			headers,
-			sni,
-			sourceIp,
-			sourcePort,
-			destIp,
-			destPort,
-		}) => {
-			try {
+			if (toolName === 'explain_request') {
+				const parseResult = v.safeParse(ExplainRequestSchema, args);
+				if (!parseResult.success) {
+					const errorMsg = parseResult.issues.map(i => `${i.path?.[0]?.key ?? 'arg'}: ${i.message}`).join(', ');
+					return { isError: true, content: [{ type: 'text', text: `Invalid arguments: ${errorMsg}` }] };
+				}
+				const {
+					controlPlaneId,
+					region,
+					flavor,
+					method,
+					host,
+					path,
+					headers,
+					sni,
+					sourceIp,
+					sourcePort,
+					destIp,
+					destPort,
+				} = parseResult.output;
+
 				const cfg = resolveConfig({ controlPlaneId, region });
 				const fetched = await fetch(cfg);
 				const resolvedFlavor: RouterFlavor = flavor ?? fetched.routerFlavor ?? 'traditional';
 
-				// Use the cached marshalled+sorted route set when available.
-				// The cache entry is keyed the same way as fetchKonnectConfigCached.
 				const cacheKey = `${cfg.region}:${cfg.controlPlaneId}`;
 				const cacheEntry = _cache.get(cacheKey);
 				let sorted: MarshalledRoute[];
@@ -385,22 +385,16 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 						}
 					}
 					sorted = [...marshalled].sort(compareRoutes);
-					// Store in the cache entry for reuse within the same TTL window.
 					cacheEntry?.marshalledByFlavor.set(resolvedFlavor, sorted);
 				}
 
-				// Normalise the path: strip query strings, fragments, and resolve dot-segments.
 				const normalizedPath = normalizePath(path);
 
 				const result = simulateRequest(sorted, {
-					method,
+					method: method ?? 'GET',
 					host: host ?? 'example.com',
 					path: normalizedPath,
-					// When headers is provided (even empty object), header constraints are
-					// evaluated strictly. When undefined, they are skipped.
 					headers: headers as Record<string, string> | undefined,
-					// L4 fields: only applied when the caller provides them.
-					// Undefined = skip the check (conservative / static-analysis mode).
 					sni,
 					sourceIp,
 					sourcePort,
@@ -436,26 +430,16 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 						},
 					],
 				};
-			} catch (err) {
-				let msg = err instanceof Error ? err.message : String(err);
-				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
 			}
-		},
-	);
 
-	server.registerTool(
-		'get_route_config',
-		{
-			description:
-				'Fetch the raw routes and services from a Konnect control plane as structured data. ' +
-				'Useful when the agent needs to inspect or reason about the full route list directly.',
-			inputSchema: {
-				...konnectParams,
-			},
-		},
-		async ({ controlPlaneId, region }) => {
-			try {
+			if (toolName === 'get_route_config') {
+				const parseResult = v.safeParse(GetRouteConfigSchema, args);
+				if (!parseResult.success) {
+					const errorMsg = parseResult.issues.map(i => `${i.path?.[0]?.key ?? 'arg'}: ${i.message}`).join(', ');
+					return { isError: true, content: [{ type: 'text', text: `Invalid arguments: ${errorMsg}` }] };
+				}
+				const { controlPlaneId, region } = parseResult.output;
+
 				const cfg = resolveConfig({ controlPlaneId, region });
 				const fetched = await fetch(cfg);
 
@@ -474,13 +458,15 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 						},
 					],
 				};
-			} catch (err) {
-				let msg = err instanceof Error ? err.message : String(err);
-				msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
-				return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
 			}
-		},
-	);
+
+			throw new Error(`Unknown tool: ${toolName}`);
+		} catch (err) {
+			let msg = err instanceof Error ? err.message : String(err);
+			msg = msg.replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]');
+			return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: msg }) }] };
+		}
+	});
 
 	const transport = new StdioServerTransport();
 	await server.connect(transport);
