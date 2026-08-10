@@ -23,8 +23,8 @@
  *                     A finding is shown when ANY involved route satisfies all predicates.
  */
 
+import fs from 'node:fs/promises';
 import cac from 'cac';
-import { Spinner } from 'nspin-bun';
 
 import { name, version } from '../package.json';
 import { analyzeRoutes } from './analyzer.ts';
@@ -38,6 +38,43 @@ import type { Finding, KonnectConfig, KonnectData, RouterFlavor } from './types.
 import { normalizePath } from './utils.ts';
 
 const cli = cac(name);
+
+class Spinner {
+	private frames: string[];
+	private interval: number;
+	private timer: any = null;
+	private text: string = '';
+	private index: number = 0;
+
+	constructor(opts: { frames: string[]; interval: number }) {
+		this.frames = opts.frames;
+		this.interval = opts.interval;
+	}
+
+	start(text?: string) {
+		if (text) this.text = text;
+		this.index = 0;
+		if (this.timer) clearInterval(this.timer);
+		this.timer = setInterval(() => {
+			const frame = this.frames[this.index]!;
+			this.index = (this.index + 1) % this.frames.length;
+			process.stdout.write(`\r\x1b[K${frame} ${this.text}`);
+		}, this.interval);
+	}
+
+	updateText(text: string) {
+		this.text = text;
+	}
+
+	stop(text?: string) {
+		if (this.timer) {
+			clearInterval(this.timer);
+			this.timer = null;
+		}
+		process.stdout.write('\r\x1b[K');
+		if (text) console.log(text);
+	}
+}
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸'];
 
@@ -422,7 +459,7 @@ cli
 				console.log(formatDumpSummary(fetched));
 			}
 		} else {
-			await Bun.write(outputFile, json);
+			await fs.writeFile(outputFile, json, 'utf-8');
 			console.log(`Config saved to ${outputFile}. ${formatDumpSummary(fetched)}`);
 		}
 	});
