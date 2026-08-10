@@ -7,7 +7,7 @@
  * completely clear without needing to read the source.
  */
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it } from 'vitest';
 
 import {
 	cidrToRange,

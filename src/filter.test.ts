@@ -12,7 +12,7 @@
  * A finding is included when ANY of its involved routes satisfies all predicates.
  */
 
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect } from 'vitest';
 
 import {
 	parseFilter,

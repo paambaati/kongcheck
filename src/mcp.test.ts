@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { _cache, fetchKonnectConfigCached, resolveConfig } from './mcp.ts';
 import type { KonnectData, KonnectConfig } from './types.ts';
