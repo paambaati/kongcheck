@@ -38,14 +38,18 @@ export function konnectRouteUrl(routeId: string, ctx: KonnectContext | undefined
 const isTTY = process.stdout.isTTY;
 
 /**
- * Returns the ANSI escape sequence for the given CSS color name, using
- * `Bun.color` to auto-detect terminal color depth (24-bit / 256 / 16 / none).
+ * Returns the ANSI escape sequence for the given CSS color name.
  * Returns an empty string when the terminal doesn't support ANSI colors.
- *
- * @see https://bun.sh/docs/runtime/color
  */
 function ansiColor(name: string): string {
-	return Bun.color(name, 'ansi') ?? '';
+	const mapping: Record<string, string> = {
+		red: '\x1b[31m',
+		yellow: '\x1b[33m',
+		cyan: '\x1b[36m',
+		green: '\x1b[32m',
+		'#808080': '\x1b[90m',
+	};
+	return mapping[name] ?? '';
 }
 
 /** ANSI reset sequence – clears both color and style attributes. */
