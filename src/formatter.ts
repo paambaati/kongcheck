@@ -9,9 +9,27 @@
  * Both formats expose the same information; only the presentation differs.
  */
 
-import relativeDate from 'tiny-relative-date';
-
 import type { Finding, KonnectData, RouterFlavor } from './types.ts';
+
+function getRelativeDate(date: Date): string {
+	const now = new Date();
+	const diffMs = now.getTime() - date.getTime();
+	const diffSec = Math.floor(diffMs / 1000);
+	const diffMin = Math.floor(diffSec / 60);
+	const diffHour = Math.floor(diffMin / 60);
+	const diffDay = Math.floor(diffHour / 24);
+
+	if (diffSec < 60) return 'just now';
+	if (diffMin < 60) return `${diffMin} minute${diffMin === 1 ? '' : 's'} ago`;
+	if (diffHour < 24) return `${diffHour} hour${diffHour === 1 ? '' : 's'} ago`;
+	if (diffDay < 30) return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`;
+
+	const months = Math.floor(diffDay / 30);
+	if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
+
+	const years = Math.floor(months / 12);
+	return `${years} year${years === 1 ? '' : 's'} ago`;
+}
 
 /**
  * Konnect-specific context used to generate UI deep-links.
@@ -169,7 +187,7 @@ export function formatHuman(
 					`\n          paths: ${paths}` +
 					`  regex_priority: ${rp}` +
 					(route.created_at
-						? `  created: ${createdDate.toISOString()} ${colour.dim('(' + relativeDate(createdDate) + ')')}`
+						? `  created: ${createdDate.toISOString()} ${colour.dim('(' + getRelativeDate(createdDate) + ')')}`
 						: '') +
 					(uiUrl ? `\n          ${colour.dim(uiUrl)}` : ''),
 			);

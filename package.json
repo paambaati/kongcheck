@@ -27,7 +27,7 @@
 		"test": "vitest run src/",
 		"test:coverage": "vitest run src/ --coverage",
 		"typecheck": "tsc --noEmit",
-		"build": "perry compile src/cli.ts -o dist/kongcheck --compile-packages cac,zod,@modelcontextprotocol/sdk",
+		"build": "perry compile src/cli.ts -o dist/kongcheck",
 		"lint": "oxlint",
 		"lint:fix": "oxlint --fix",
 		"format": "oxfmt",
@@ -36,23 +36,46 @@
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "1.30.0",
 		"cac": "7.0.0",
-		"tiny-relative-date": "2.0.2",
 		"zod": "4.4.3"
 	},
 	"devDependencies": {
+		"@perryts/perry": "0.5.1220",
 		"@types/bun": "1.3.14",
 		"@types/node": "^20.11.0",
-		"@vitest/coverage-v8": "^2.1.0",
+		"@vitest/coverage-v8": "4.1.10",
 		"oxfmt": "0.62.0",
 		"oxlint": "1.77.0",
 		"oxlint-tsgolint": "7.0.2001",
 		"typescript": "7.0.2",
-		"vitest": "^2.1.0"
+		"vitest": "4.1.10"
 	},
-	"devEngines": {
-		"runtime": {
-			"name": "bun",
-			"onFail": "error"
+	"perry": {
+		"codegen": [
+			{ "label": "generate version", "command": "node scripts/generate-version.js" }
+		],
+		"compilePackages": ["cac", "zod", "@modelcontextprotocol/sdk", "ajv", "ajv-formats", "zod-to-json-schema", "fast-deep-equal", "fast-uri", "json-schema-traverse"],
+		"nativeLibrary": {
+			"sources": ["perry-stub.c"],
+			"functions": [
+				{ "name": "js_ext_http_agent_dispatch_method", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_agent_dispatch_property", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_agent_dispatch_property_set", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_agent_is_handle", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_client_incoming_message_is_handle", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_client_incoming_message_set_encoding", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_client_inflight", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_client_request_dispatch_method", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_client_request_dispatch_property", "params": [], "returns": "void" },
+				{ "name": "js_ext_http_client_request_is_handle", "params": [], "returns": "void" },
+				{ "name": "js_http_has_pending", "params": [], "returns": "void" },
+				{ "name": "js_http_incoming_message_pipe", "params": [], "returns": "void" },
+				{ "name": "js_http_is_incoming_message", "params": [], "returns": "void" },
+				{ "name": "js_http_response_trailers", "params": [], "returns": "void" }
+			]
+		},
+		"allow": {
+			"compilePackages": ["*"],
+			"nativeLibrary": ["*"]
 		}
 	}
 }

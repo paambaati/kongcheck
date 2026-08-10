@@ -26,7 +26,7 @@
 import fs from 'node:fs/promises';
 import cac from 'cac';
 
-import { name, version } from '../package.json';
+import { name, version } from './generated-version.ts';
 import { analyzeRoutes } from './analyzer.ts';
 import { fetchKonnectConfig, loadLocalConfig } from './client.ts';
 import { applyFindingFilter, parseFilters } from './filter.ts';
@@ -500,4 +500,36 @@ try {
 
 if (!cli.matchedCommand && !cli.options['help']) {
 	cli.outputHelp();
+}
+
+declare function js_ext_http_agent_dispatch_method(): void;
+declare function js_ext_http_agent_dispatch_property(): void;
+declare function js_ext_http_agent_dispatch_property_set(): void;
+declare function js_ext_http_agent_is_handle(): void;
+declare function js_ext_http_client_incoming_message_is_handle(): void;
+declare function js_ext_http_client_incoming_message_set_encoding(): void;
+declare function js_ext_http_client_inflight(): void;
+declare function js_ext_http_client_request_dispatch_method(): void;
+declare function js_ext_http_client_request_dispatch_property(): void;
+declare function js_ext_http_client_request_is_handle(): void;
+declare function js_http_has_pending(): void;
+declare function js_http_incoming_message_pipe(): void;
+declare function js_http_is_incoming_message(): void;
+declare function js_http_response_trailers(): void;
+
+if (globalThis && (globalThis as any).__never_eval_stub__) {
+	js_ext_http_agent_dispatch_method();
+	js_ext_http_agent_dispatch_property();
+	js_ext_http_agent_dispatch_property_set();
+	js_ext_http_agent_is_handle();
+	js_ext_http_client_incoming_message_is_handle();
+	js_ext_http_client_incoming_message_set_encoding();
+	js_ext_http_client_inflight();
+	js_ext_http_client_request_dispatch_method();
+	js_ext_http_client_request_dispatch_property();
+	js_ext_http_client_request_is_handle();
+	js_http_has_pending();
+	js_http_incoming_message_pipe();
+	js_http_is_incoming_message();
+	js_http_response_trailers();
 }

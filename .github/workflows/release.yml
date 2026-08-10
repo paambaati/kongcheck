@@ -68,7 +68,7 @@ jobs:
         run: bun install --frozen-lockfile --omit dev
 
       - name: Install Perry compiler
-        run: npm install -g @perryts/perry
+        run: bun install -g @perryts/perry
 
       # Perry compiles all targets to native machine-code executables.
       - name: Build platform binaries
