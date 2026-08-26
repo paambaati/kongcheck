@@ -5,7 +5,7 @@
     "": {
       "name": "kongcheck",
       "dependencies": {
-        "@modelcontextprotocol/server": "^2.0.0",
+        "@modelcontextprotocol/server": "2.0.0",
         "@valibot/to-json-schema": "1.7.1",
         "cac": "7.0.0",
         "nspin-bun": "1.2.1",
