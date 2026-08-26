@@ -85,7 +85,7 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸'];
  */
 function makeSpinner(verbose: boolean) {
 	if (verbose || !process.stdout.isTTY) {
-		return { start(_?: string) {}, updateText(_: string) {}, stop(_?: string) {} };
+		return { start() {}, updateText() {}, stop() {} };
 	}
 	return new Spinner({ frames: SPINNER_FRAMES, interval: 80 });
 }
@@ -278,7 +278,7 @@ cli
 			process.exit(1);
 		}
 
-		// Normalize the path the same way Kong does before matching –
+		// Normalize the path the same way Kong does before matching –
 		//   1. Strip the query string (everything from '?' onwards).
 		//   2. Percent-decode path segments.
 		//   3. Resolve '.' and '..' segments via URL parsing.
