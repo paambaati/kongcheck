@@ -15,9 +15,10 @@
  *   - region is also optional per-call, falling back to KONNECT_REGION or "us".
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { z } from 'zod';
+import { McpServer } from '@modelcontextprotocol/server';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { toStandardJsonSchema } from '@valibot/to-json-schema';
+import * as v from 'valibot';
 
 import { name, version } from '../package.json';
 import { analyzeRoutes } from './analyzer.ts';
@@ -28,39 +29,50 @@ import type { KonnectData, KonnectConfig, MarshalledRoute, RouterFlavor } from '
 import { normalizePath } from './utils.ts';
 
 /** Fields common to every tool that needs a live Konnect connection. */
-const konnectParams = {
-	controlPlaneId: z
-		.uuid()
-		.optional()
-		.describe(
-			'UUID of the Konnect control plane to inspect. ' +
-				'Falls back to the KONNECT_CONTROL_PLANE_ID environment variable.',
+const konnectEntries = {
+	controlPlaneId: v.optional(
+		v.pipe(
+			v.string(),
+			v.uuid(),
+			v.description(
+				'UUID of the Konnect control plane to inspect. ' +
+					'Falls back to the KONNECT_CONTROL_PLANE_ID environment variable.',
+			),
 		),
-	region: z
-		.enum(Object.keys(REGION_MAP))
-		.optional()
-		.describe('Konnect region. Defaults to KONNECT_REGION environment variable or "us".'),
+	),
+	region: v.optional(
+		v.pipe(
+			v.picklist(Object.keys(REGION_MAP)),
+			v.description('Konnect region. Defaults to KONNECT_REGION environment variable or "us".'),
+		),
+	),
 };
 
-const flavorParam = z
-	.enum(['traditional', 'traditional_compatible', 'expressions'])
-	.optional()
-	.describe('Override router flavor. Auto-detected from Konnect when omitted.');
+const flavorSchema = v.optional(
+	v.pipe(
+		v.picklist(['traditional', 'traditional_compatible', 'expressions']),
+		v.description('Override router flavor. Auto-detected from Konnect when omitted.'),
+	),
+);
 
 const FILTER_KEYS = ['path', 'name', 'service', 'tag', 'id'] as const satisfies FilterKey[];
 
-const filterParam = z
-	.array(
-		z.object({
-			key: z.enum(FILTER_KEYS).describe('Attribute to filter on.'),
-			value: z.string().describe('Substring to match against (case-insensitive).'),
-		}),
-	)
-	.optional()
-	.describe(
-		'Filter findings to routes matching all given key/value pairs (ANDed). ' +
-			'Supported keys: path, name, service, tag, id.',
-	);
+const filterSchema = v.optional(
+	v.pipe(
+		v.array(
+			v.object({
+				key: v.pipe(v.picklist(FILTER_KEYS), v.description('Attribute to filter on.')),
+				value: v.pipe(v.string(), v.description('Substring to match against (case-insensitive).')),
+			}),
+		),
+		v.description(
+			'Filter findings to routes matching all given key/value pairs (ANDed). ' +
+				'Supported keys: path, name, service, tag, id.',
+		),
+	),
+);
+
+const portSchema = v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(65535));
 
 /**
  * In-memory config cache (only for MCP mode)/
@@ -174,21 +186,25 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			description:
 				'Run a full four-pass audit of a Konnect control plane: suspicious regex paths, ' +
 				'route collisions, shadowing, and (optionally) universal catch-all routes.',
-			inputSchema: {
-				...konnectParams,
-				flavor: flavorParam,
-				includeInfo: z
-					.boolean()
-					.optional()
-					.default(false)
-					.describe(
-						'Include INFO-level findings. INFO covers: universal catch-all routes that ' +
-							'match every request, and route pairs that are structurally stratified ' +
-							'(mutually exclusive by SNI, source/destination IP, or protocol family) ' +
-							'so a collision is impossible. Default: false.',
+			inputSchema: toStandardJsonSchema(
+				v.object({
+					...konnectEntries,
+					flavor: flavorSchema,
+					includeInfo: v.optional(
+						v.pipe(
+							v.boolean(),
+							v.description(
+								'Include INFO-level findings. INFO covers: universal catch-all routes that ' +
+									'match every request, and route pairs that are structurally stratified ' +
+									'(mutually exclusive by SNI, source/destination IP, or protocol family) ' +
+									'so a collision is impossible. Default: false.',
+							),
+						),
+						false,
 					),
-				filter: filterParam,
-			},
+					filter: filterSchema,
+				}),
+			),
 		},
 		async ({ controlPlaneId, region, flavor, includeInfo, filter }) => {
 			try {
@@ -233,11 +249,13 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			description:
 				'Return only shadowing and collision findings for a Konnect control plane. ' +
 				'Excludes suspicious-regex findings.',
-			inputSchema: {
-				...konnectParams,
-				flavor: flavorParam,
-				filter: filterParam,
-			},
+			inputSchema: toStandardJsonSchema(
+				v.object({
+					...konnectEntries,
+					flavor: flavorSchema,
+					filter: filterSchema,
+				}),
+			),
 		},
 		async ({ controlPlaneId, region, flavor, filter }) => {
 			try {
@@ -282,67 +300,80 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 				'(conservative mode: every route is a candidate). ' +
 				'The path is normalised before matching: query strings and fragments are stripped ' +
 				'and dot-segments are resolved.',
-			inputSchema: {
-				...konnectParams,
-				flavor: flavorParam,
-				method: z.string().default('GET').describe('HTTP method, e.g. "GET".'),
-				host: z
-					.string()
-					.optional()
-					.describe(
-						'Host header value, e.g. "api.example.com". ' +
-							'Defaults to "example.com" when omitted (sufficient for path-only matching).',
+			inputSchema: toStandardJsonSchema(
+				v.object({
+					...konnectEntries,
+					flavor: flavorSchema,
+					method: v.optional(v.pipe(v.string(), v.description('HTTP method, e.g. "GET".')), 'GET'),
+					host: v.optional(
+						v.pipe(
+							v.string(),
+							v.description(
+								'Host header value, e.g. "api.example.com". ' +
+									'Defaults to "example.com" when omitted (sufficient for path-only matching).',
+							),
+						),
 					),
-				path: z
-					.string()
-					.describe('Request path, e.g. "/api/v1/users". Query strings and fragments are stripped automatically.'),
-				headers: z
-					.record(z.string(), z.string())
-					.optional()
-					.describe(
-						'Optional request headers as a key/value object, e.g. {"x-env": "prod"}. ' +
-							'When provided, routes with header constraints are evaluated strictly. ' +
-							'When omitted, header constraints are skipped (every route is a candidate).',
+					path: v.pipe(
+						v.string(),
+						v.description(
+							'Request path, e.g. "/api/v1/users". Query strings and fragments are stripped automatically.',
+						),
 					),
-				sni: z
-					.string()
-					.optional()
-					.describe(
-						'TLS SNI value for stream route simulation, e.g. "api.example.com". ' +
-							'When provided, routes with snis constraints are evaluated strictly.',
+					headers: v.optional(
+						v.pipe(
+							v.record(v.string(), v.string()),
+							v.description(
+								'Optional request headers as a key/value object, e.g. {"x-env": "prod"}. ' +
+									'When provided, routes with header constraints are evaluated strictly. ' +
+									'When omitted, header constraints are skipped (every route is a candidate).',
+							),
+						),
 					),
-				sourceIp: z
-					.string()
-					.optional()
-					.describe(
-						'Source IP address of the connection, e.g. "10.0.1.5". IPv4 and IPv6 are ' +
-							'accepted; CIDR matching applies to the route constraints. When provided, ' +
-							'sources constraints on routes are evaluated strictly.',
+					sni: v.optional(
+						v.pipe(
+							v.string(),
+							v.description(
+								'TLS SNI value for stream route simulation, e.g. "api.example.com". ' +
+									'When provided, routes with snis constraints are evaluated strictly.',
+							),
+						),
 					),
-				sourcePort: z
-					.number()
-					.int()
-					.min(1)
-					.max(65535)
-					.optional()
-					.describe(
-						'Source TCP/UDP port of the connection, e.g. 54321. Evaluated only when sourceIp is also provided.',
+					sourceIp: v.optional(
+						v.pipe(
+							v.string(),
+							v.description(
+								'Source IP address of the connection, e.g. "10.0.1.5". IPv4 and IPv6 are ' +
+									'accepted; CIDR matching applies to the route constraints. When provided, ' +
+									'sources constraints on routes are evaluated strictly.',
+							),
+						),
 					),
-				destIp: z
-					.string()
-					.optional()
-					.describe(
-						'Destination IP address of the connection, e.g. "192.168.1.10". When provided, ' +
-							'destinations constraints on routes are evaluated strictly.',
+					sourcePort: v.optional(
+						v.pipe(
+							portSchema,
+							v.description(
+								'Source TCP/UDP port of the connection, e.g. 54321. Evaluated only when sourceIp is also provided.',
+							),
+						),
 					),
-				destPort: z
-					.number()
-					.int()
-					.min(1)
-					.max(65535)
-					.optional()
-					.describe('Destination TCP/UDP port, e.g. 443. Evaluated only when destIp is also provided.'),
-			},
+					destIp: v.optional(
+						v.pipe(
+							v.string(),
+							v.description(
+								'Destination IP address of the connection, e.g. "192.168.1.10". When provided, ' +
+									'destinations constraints on routes are evaluated strictly.',
+							),
+						),
+					),
+					destPort: v.optional(
+						v.pipe(
+							portSchema,
+							v.description('Destination TCP/UDP port, e.g. 443. Evaluated only when destIp is also provided.'),
+						),
+					),
+				}),
+			),
 		},
 		async ({
 			controlPlaneId,
@@ -397,7 +428,7 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 					path: normalizedPath,
 					// When headers is provided (even empty object), header constraints are
 					// evaluated strictly. When undefined, they are skipped.
-					headers: headers as Record<string, string> | undefined,
+					headers,
 					// L4 fields: only applied when the caller provides them.
 					// Undefined = skip the check (conservative / static-analysis mode).
 					sni,
@@ -449,9 +480,7 @@ export async function startMcpServer(cacheTtlMs = 60_000): Promise<void> {
 			description:
 				'Fetch the raw routes and services from a Konnect control plane as structured data. ' +
 				'Useful when the agent needs to inspect or reason about the full route list directly.',
-			inputSchema: {
-				...konnectParams,
-			},
+			inputSchema: toStandardJsonSchema(v.object({ ...konnectEntries })),
 		},
 		async ({ controlPlaneId, region }) => {
 			try {
