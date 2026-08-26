@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/paambaati/kongcheck/compare/v1.2.0...v1.3.0) (2026-08-26)
+
+
+### Features
+
+* upgrade to Bun 1.4.x and MCP SDK ([#11](https://github.com/paambaati/kongcheck/issues/11)) ([55514ed](https://github.com/paambaati/kongcheck/commit/55514edd1aad4c7fd1f17f68f836a0e07bfd1fd4))
+
 ## [1.2.0](https://github.com/paambaati/kongcheck/compare/v1.1.7...v1.2.0) (2026-07-16)
 
 
