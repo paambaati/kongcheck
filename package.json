@@ -25,7 +25,7 @@
 	"scripts": {
 		"start": "bun run src/cli.ts",
 		"test": "bun test src/",
-		"test:coverage": "bun test src/ --coverage",
+		"test:coverage": "bun run test --coverage",
 		"typecheck": "tsc --noEmit",
 		"build": "bun build --compile --target bun --outfile dist/kongcheck src/cli.ts",
 		"lint": "oxlint",
@@ -42,9 +42,9 @@
 		"valibot": "1.4.2"
 	},
 	"devDependencies": {
-		"@types/bun": "1.4.0",
-		"oxfmt": "0.65.0",
-		"oxlint": "1.80.0",
+		"@types/bun": "1.4.1",
+		"oxfmt": "0.66.0",
+		"oxlint": "1.81.0",
 		"oxlint-tsgolint": "7.0.2001",
 		"typescript": "7.0.2"
 	},
