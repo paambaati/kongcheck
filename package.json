@@ -39,12 +39,12 @@
 		"cac": "7.0.0",
 		"nspin-bun": "1.2.1",
 		"tiny-relative-date": "2.0.2",
-		"valibot": "1.4.2"
+		"valibot": "1.5.0"
 	},
 	"devDependencies": {
-		"@types/bun": "1.4.1",
-		"oxfmt": "0.66.0",
-		"oxlint": "1.81.0",
+		"@types/bun": "1.4.2",
+		"oxfmt": "0.67.0",
+		"oxlint": "1.82.0",
 		"oxlint-tsgolint": "7.0.2001",
 		"typescript": "7.0.2"
 	},
