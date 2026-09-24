@@ -346,13 +346,6 @@ func fetchAll[T any](ctx context.Context, c *Client, baseURL, token, label strin
 // fetchPage GETs one page, retrying 429 and 503 responses (honouring
 // Retry-After, else exponential backoff of 1s, 2s, 4s). Other errors fail
 // immediately.
-//
-// The whole call — every attempt plus its backoff sleep — shares a single
-// pageTimeout deadline, mirroring the TS original's one AbortController per
-// fetchPage call. A fresh per-attempt timeout would let up to maxRetries+1
-// attempts each burn a full pageTimeout, multiplying the worst case (with
-// maxRetries=3, up to ~4x pageTimeout plus backoff instead of one hard
-// ceiling).
 func (c *Client) fetchPage(ctx context.Context, rawURL, token string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, pageTimeout)
 	defer cancel()
@@ -391,10 +384,6 @@ func (c *Client) fetchPage(ctx context.Context, rawURL, token string, out any) e
 	}
 }
 
-// get performs a single GET request. Callers that need a deadline (fetchPage
-// bounds its whole retry loop; detectRouterFlavor bounds its single request)
-// apply their own context.WithTimeout — get itself does not, so it does not
-// silently re-arm a fresh timeout for every attempt of a retry loop.
 func (c *Client) get(ctx context.Context, rawURL, token string) (int, http.Header, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
