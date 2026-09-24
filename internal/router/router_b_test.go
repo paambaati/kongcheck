@@ -518,6 +518,22 @@ func TestRouterB(t *testing.T) {
 		t.Run("returns null for an empty string", func(t *testing.T) {
 			expectIPv4NullB(t, "", "Empty string is not a valid IPv4 address")
 		})
+
+		// net/netip enforces strict RFC 6943 syntax and rejects a leading
+		// zero in any octet. Kong's own IP matching (lua-resty-ipmatcher, a
+		// tonumber-based parser) and the TS predecessor (Number(part)) both
+		// accept it, so a route CIDR/IP written this way must still parse.
+		t.Run("accepts a leading-zero octet (lenient, matches Kong's own parser)", func(t *testing.T) {
+			expectIPv4B(t, "010.0.0.1", mustIPv4B(t, "10.0.0.1"), "010.0.0.1 must parse the same as 10.0.0.1")
+		})
+
+		t.Run("accepts leading zeros in multiple octets", func(t *testing.T) {
+			expectIPv4B(t, "010.000.000.001", mustIPv4B(t, "10.0.0.1"), "010.000.000.001 must parse the same as 10.0.0.1")
+		})
+
+		t.Run("still returns null when a leading-zero octet is out of range", func(t *testing.T) {
+			expectIPv4NullB(t, "010.0.0.256", "Octet 256 is out of range even after stripping the leading zero elsewhere")
+		})
 	})
 
 	t.Run("cidrToRange – CIDR notation to inclusive [lo, hi] range", func(t *testing.T) {
@@ -568,6 +584,18 @@ func TestRouterB(t *testing.T) {
 				0xFFFFFFFF, "0.0.0.0/0 hi must be 0xFFFFFFFF")
 		})
 
+		t.Run("accepts a leading-zero octet in the network address", func(t *testing.T) {
+			checkRangeB(t, "010.0.0.0/8", "010.0.0.0/8 must parse the same as 10.0.0.0/8",
+				mustIPv4B(t, "10.0.0.0"), "010.0.0.0/8 lo must be 10.0.0.0",
+				mustIPv4B(t, "10.255.255.255"), "010.0.0.0/8 hi must be 10.255.255.255")
+		})
+
+		t.Run("accepts a leading-zero prefix length", func(t *testing.T) {
+			checkRangeB(t, "192.168.0.0/024", "192.168.0.0/024 must parse the same as 192.168.0.0/24",
+				mustIPv4B(t, "192.168.0.0"), "192.168.0.0/024 lo must be 192.168.0.0",
+				mustIPv4B(t, "192.168.0.255"), "192.168.0.0/024 hi must be 192.168.0.255")
+		})
+
 		t.Run("returns null for an IPv6 CIDR", func(t *testing.T) {
 			expectNullRangeB(t, "::1/128", "IPv6 CIDRs must return null – conservative: callers assume potential overlap")
 		})
@@ -614,6 +642,55 @@ func TestRouterB(t *testing.T) {
 		t.Run("returns true (conservative) for an IPv6 CIDR", func(t *testing.T) {
 			expectBoolB(t, router.IPsCanOverlap("::1/128", "10.0.0.1"), true,
 				"IPv6 CIDRs cannot be parsed – conservative overlap assumed")
+		})
+	})
+
+	// matchSrcDstEntry (exercised indirectly via MatchRoute's Sources check)
+	// must tolerate leading-zero IPv4 octets the same way parseIpv4/
+	// cidrToRange do, for both the exact-match and CIDR-match branches.
+	t.Run("matchRoute – Sources IP matching tolerates leading-zero octets", func(t *testing.T) {
+		t.Run("exact-match entry with a leading-zero octet matches a normalized request IP", func(t *testing.T) {
+			mr := makeRoute(model.KongRoute{
+				Paths:   []string{"/api"},
+				Sources: []model.IPPort{{IP: "010.0.0.1"}},
+			})
+			expectBoolB(t,
+				matchB(mr, router.SimRequest{Method: "GET", Path: "/api", SourceIP: ptr("10.0.0.1")}),
+				true,
+				`Sources entry "010.0.0.1" must match request source IP "10.0.0.1" (leading zero tolerated)`)
+		})
+
+		t.Run("exact-match entry with a leading-zero octet does not match a different IP", func(t *testing.T) {
+			mr := makeRoute(model.KongRoute{
+				Paths:   []string{"/api"},
+				Sources: []model.IPPort{{IP: "010.0.0.1"}},
+			})
+			expectBoolB(t,
+				matchB(mr, router.SimRequest{Method: "GET", Path: "/api", SourceIP: ptr("10.0.0.2")}),
+				false,
+				`Sources entry "010.0.0.1" must not match a genuinely different source IP`)
+		})
+
+		t.Run("CIDR entry with a leading-zero network address matches an IP inside the range", func(t *testing.T) {
+			mr := makeRoute(model.KongRoute{
+				Paths:   []string{"/api"},
+				Sources: []model.IPPort{{IP: "010.0.0.0/8"}},
+			})
+			expectBoolB(t,
+				matchB(mr, router.SimRequest{Method: "GET", Path: "/api", SourceIP: ptr("10.5.5.5")}),
+				true,
+				`Sources entry "010.0.0.0/8" must match "10.5.5.5" (leading zero tolerated, same as Kong's own CIDR parsing)`)
+		})
+
+		t.Run("CIDR entry with a leading-zero network address does not match an IP outside the range", func(t *testing.T) {
+			mr := makeRoute(model.KongRoute{
+				Paths:   []string{"/api"},
+				Sources: []model.IPPort{{IP: "010.0.0.0/8"}},
+			})
+			expectBoolB(t,
+				matchB(mr, router.SimRequest{Method: "GET", Path: "/api", SourceIP: ptr("11.0.0.1")}),
+				false,
+				`Sources entry "010.0.0.0/8" must not match "11.0.0.1", which is outside 10.0.0.0/8`)
 		})
 	})
 
