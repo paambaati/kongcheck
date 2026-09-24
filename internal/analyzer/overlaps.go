@@ -15,10 +15,18 @@ type overlapHit struct {
 }
 
 // findOverlapHits scans all route pairs (i < j) for a sibling overlap sample.
+// Pairs already present in covered (already reported as a collision by the
+// earlier pass) are skipped before paying for the sample-matching work, not
+// just filtered out afterward — findSiblingOverlapSample is comparatively
+// expensive (regex evaluation against every path sample of both routes), and
+// a control plane where the collision pass already resolved most pairs would
+// otherwise pay that cost twice for no benefit.
+//
 // The scan is O(n²) but embarrassingly parallel: each row is processed
 // independently and hits are returned in (i, j) order, matching a sequential
-// nested loop exactly.
-func findOverlapHits(ctx context.Context, routes []*router.MarshalledRoute) []overlapHit {
+// nested loop exactly. covered is only read here, never written, so
+// concurrent access from parallelFor's workers is safe.
+func findOverlapHits(ctx context.Context, routes []*router.MarshalledRoute, covered map[pairKey]bool) []overlapHit {
 	rows := make([][]overlapHit, len(routes))
 	parallelFor(ctx, len(routes), func(i int) {
 		a := routes[i]
@@ -31,6 +39,9 @@ func findOverlapHits(ctx context.Context, routes []*router.MarshalledRoute) []ov
 			}
 			b := routes[j]
 			if b.IsUniversal || a.Route.ID == b.Route.ID {
+				continue
+			}
+			if covered[makePairKey(a.Route.ID, b.Route.ID)] {
 				continue
 			}
 			if sample, ok := findSiblingOverlapSample(a, b); ok {
@@ -57,9 +68,13 @@ func detectSiblingOverlaps(ctx context.Context, routes []*router.MarshalledRoute
 	}
 
 	findings := []*model.Finding{}
-	for _, hit := range findOverlapHits(ctx, routes) {
+	for _, hit := range findOverlapHits(ctx, routes, covered) {
 		a, b := routes[hit.i], routes[hit.j]
 		key := makePairKey(a.Route.ID, b.Route.ID)
+		// findOverlapHits already excluded pairs covered before the scan
+		// started; this guards against this pass emitting its own
+		// duplicate if a pair somehow appears twice (it currently can't,
+		// since each unordered (i, j) pair is visited exactly once above).
 		if covered[key] {
 			continue
 		}

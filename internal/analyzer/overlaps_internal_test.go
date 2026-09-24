@@ -10,6 +10,7 @@
 package analyzer
 
 import (
+	"context"
 	"testing"
 
 	"github.com/paambaati/kongcheck/internal/model"
@@ -101,5 +102,47 @@ func TestOverlapSample_FullMatchNonASCIINotFalsePositive(t *testing.T) {
 
 	if _, ok := overlapSample(src, dst); ok {
 		t.Fatal("overlapSample reported a dirty-boundary overlap for two routes with an identical full-length non-ASCII prefix match")
+	}
+}
+
+// TestFindOverlapHits_SkipsCoveredPairsBeforeMatching guards against
+// detectSiblingOverlaps/findOverlapHits paying for the (comparatively
+// expensive) sample-matching work on a pair the collision pass already
+// reported. Before this fix, the covered-set check happened only after
+// findSiblingOverlapSample had already run for every pair; findOverlapHits
+// now takes covered directly and skips the match call entirely.
+func TestFindOverlapHits_SkipsCoveredPairsBeforeMatching(t *testing.T) {
+	a := marshalledRouteWithPrefix("r1", "/payments")
+	b := marshalledRouteWithPrefix("r2", "/payments-v2")
+	routes := []*router.MarshalledRoute{a, b}
+
+	hits := findOverlapHits(context.Background(), routes, map[pairKey]bool{})
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 overlap hit when the pair is not covered, got %d: %+v", len(hits), hits)
+	}
+
+	key := makePairKey("r1", "r2")
+	hits = findOverlapHits(context.Background(), routes, map[pairKey]bool{key: true})
+	if len(hits) != 0 {
+		t.Fatalf("expected 0 overlap hits once the pair is already covered, got %d: %+v", len(hits), hits)
+	}
+}
+
+// TestDetectSiblingOverlaps_DoesNotDuplicateAnAlreadyCoveredPair is the
+// end-to-end counterpart: a pair already present in the collision pass's
+// findings must not also produce a sibling-overlap finding.
+func TestDetectSiblingOverlaps_DoesNotDuplicateAnAlreadyCoveredPair(t *testing.T) {
+	a := marshalledRouteWithPrefix("r1", "/payments")
+	b := marshalledRouteWithPrefix("r2", "/payments-v2")
+	routes := []*router.MarshalledRoute{a, b}
+
+	existing := []*model.Finding{{
+		Routes: []*model.KongRoute{a.Route, b.Route},
+	}}
+
+	findings := detectSiblingOverlaps(context.Background(), routes, model.FlavorTraditional, existing, true)
+	if len(findings) != 0 {
+		t.Fatalf("expected no sibling-overlap finding for a pair already covered by the collision pass, got %d: %+v",
+			len(findings), findings)
 	}
 }
