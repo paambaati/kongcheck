@@ -93,6 +93,39 @@ func TestCLI_ExplainRequest(t *testing.T) {
 	}
 }
 
+// TestCLI_ExplainRequest_JSONPreservesRouteFieldOrder guards against
+// printExplainJSON's `_konnectUrl` injection reordering a matched route's
+// fields. It used to round-trip through a map[string]json.RawMessage, which
+// encoding/json always re-marshals with alphabetically sorted keys — putting
+// "_konnectUrl" (ASCII '_' sorts before any lowercase letter) first, ahead of
+// every field of the route itself, instead of appended last as intended.
+func TestCLI_ExplainRequest_JSONPreservesRouteFieldOrder(t *testing.T) {
+	app, stdout, stderr := stubApp(sampleData())
+	code := app.Run(context.Background(), []string{
+		"explain-request",
+		"--file", "mock.json",
+		"--path", "/api/v1/userstest",
+		"--method", "GET",
+		"--format", "json",
+	})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d. stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	route := strings.Index(out, `"route"`)
+	flavor := strings.Index(out, `"flavor"`)
+	konnectURL := strings.Index(out, `"_konnectUrl"`)
+	if route < 0 || flavor < 0 || konnectURL < 0 {
+		t.Fatalf("expected route, flavor, and _konnectUrl keys in output:\n%s", out)
+	}
+	// MarshalledRoute declares "route" before "flavor" before "_konnectUrl"
+	// is appended; alphabetical order would reverse all three.
+	if !(route < flavor && flavor < konnectURL) {
+		t.Errorf("expected declaration order (route, ..., flavor, ..., _konnectUrl last), "+
+			"got positions route=%d flavor=%d _konnectUrl=%d in:\n%s", route, flavor, konnectURL, out)
+	}
+}
+
 func TestCLI_DumpConfig(t *testing.T) {
 	app, stdout, stderr := stubApp(sampleData())
 	code := app.Run(context.Background(), []string{

@@ -181,24 +181,33 @@ func (a *App) runExplain(cmd *cobra.Command, g *globalFlags, f *explainFlags) er
 }
 
 // printExplainJSON writes the simulation result, adding `_konnectUrl` to
-// every matched route when a Konnect context is available.
+// every matched route when a Konnect context is available. `_konnectUrl` is
+// spliced in after the route's other fields via raw bytes, preserving their
+// original marshal order — round-tripping through a map[string]json.RawMessage
+// would force encoding/json to alphabetize every key on re-marshal.
 func (a *App) printExplainJSON(res *router.SimResult, ctx *format.KonnectContext) error {
-	withURL := func(mr *router.MarshalledRoute) (map[string]json.RawMessage, error) {
+	withURL := func(mr *router.MarshalledRoute) (json.RawMessage, error) {
 		b, err := json.Marshal(mr)
 		if err != nil {
 			return nil, err
 		}
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(b, &m); err != nil {
+		u := format.RouteURL(mr.Route.ID, ctx)
+		if u == "" || len(b) == 0 || b[len(b)-1] != '}' {
+			return b, nil
+		}
+		urlJSON, err := json.Marshal(u)
+		if err != nil {
 			return nil, err
 		}
-		if u := format.RouteURL(mr.Route.ID, ctx); u != "" {
-			m["_konnectUrl"], _ = json.Marshal(u)
-		}
-		return m, nil
+		out := make(json.RawMessage, 0, len(b)+len(urlJSON)+len(`,"_konnectUrl":`))
+		out = append(out, b[:len(b)-1]...)
+		out = append(out, `,"_konnectUrl":`...)
+		out = append(out, urlJSON...)
+		out = append(out, '}')
+		return out, nil
 	}
 
-	matched := make([]map[string]json.RawMessage, 0, len(res.MatchedRoutes))
+	matched := make([]json.RawMessage, 0, len(res.MatchedRoutes))
 	for _, mr := range res.MatchedRoutes {
 		m, err := withURL(mr)
 		if err != nil {
@@ -206,16 +215,16 @@ func (a *App) printExplainJSON(res *router.SimResult, ctx *format.KonnectContext
 		}
 		matched = append(matched, m)
 	}
-	var winner map[string]json.RawMessage
+	var winner json.RawMessage
 	if res.Winner != nil {
 		winner = matched[0]
 	}
 
 	b, err := json.MarshalIndent(struct {
-		Request       router.SimRequest            `json:"request"`
-		MatchedRoutes []map[string]json.RawMessage `json:"matchedRoutes"`
-		Winner        map[string]json.RawMessage   `json:"winner"`
-		Explanation   []string                     `json:"explanation"`
+		Request       router.SimRequest `json:"request"`
+		MatchedRoutes []json.RawMessage `json:"matchedRoutes"`
+		Winner        json.RawMessage   `json:"winner"`
+		Explanation   []string          `json:"explanation"`
 	}{res.Request, matched, winner, res.Explanation()}, "", "  ")
 	if err != nil {
 		return err
