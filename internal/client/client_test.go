@@ -16,14 +16,42 @@ import (
 )
 
 func TestClient_RedactBearer(t *testing.T) {
-	msg := "failed with Bearer secret123 and Bearer token-xyz"
-	redacted := client.RedactBearer(msg)
-	if strings.Contains(redacted, "secret123") || strings.Contains(redacted, "token-xyz") {
-		t.Fatalf("expected tokens redacted, got %s", redacted)
-	}
-	if !strings.Contains(redacted, "Bearer [REDACTED]") {
-		t.Fatalf("expected placeholder present, got %s", redacted)
-	}
+	t.Run("bearer tokens", func(t *testing.T) {
+		msg := "failed with Bearer secret123 and Bearer token-xyz"
+		redacted := client.RedactBearer(msg)
+		if strings.Contains(redacted, "secret123") || strings.Contains(redacted, "token-xyz") {
+			t.Fatalf("expected tokens redacted, got %s", redacted)
+		}
+		if !strings.Contains(redacted, "Bearer [REDACTED]") {
+			t.Fatalf("expected placeholder present, got %s", redacted)
+		}
+	})
+
+	t.Run("bare Kong personal access tokens", func(t *testing.T) {
+		msg := "POST https://us.api.konghq.com/v2?token=kpat_ABCdef123456-_ failed"
+		redacted := client.RedactBearer(msg)
+		if strings.Contains(redacted, "kpat_ABCdef123456-_") {
+			t.Fatalf("expected bare PAT redacted, got %s", redacted)
+		}
+		if !strings.Contains(redacted, "[REDACTED]") {
+			t.Fatalf("expected [REDACTED] placeholder, got %s", redacted)
+		}
+	})
+
+	t.Run("Authorization header value with PAT", func(t *testing.T) {
+		msg := "Authorization: Bearer kpat_live_secret_value"
+		redacted := client.RedactBearer(msg)
+		if strings.Contains(redacted, "kpat_live_secret_value") {
+			t.Fatalf("expected PAT redacted, got %s", redacted)
+		}
+	})
+
+	t.Run("does not mangle non-secret text", func(t *testing.T) {
+		msg := "route path /api/v1/users has no secrets"
+		if got := client.RedactBearer(msg); got != msg {
+			t.Fatalf("expected no change, got %s", got)
+		}
+	})
 }
 
 func TestClient_FetchKonnectConfig(t *testing.T) {

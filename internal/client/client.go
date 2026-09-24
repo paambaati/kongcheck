@@ -13,21 +13,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/paambaati/kongcheck/internal/model"
+	"github.com/paambaati/kongcheck/internal/strutil"
 )
 
-// Regions maps Konnect region codes to API base URLs.
-var Regions = map[string]string{
+// Region codes in display order. Prefer RegionCodes/RegionBaseURL over the
+// raw tables so callers cannot mutate shared state.
+var regionCodes = []string{"us", "eu", "au", "me", "in", "sg"}
+
+var regions = map[string]string{
 	"us": "https://us.api.konghq.com",
 	"eu": "https://eu.api.konghq.com",
 	"au": "https://au.api.konghq.com",
@@ -36,8 +42,16 @@ var Regions = map[string]string{
 	"sg": "https://sg.api.konghq.com",
 }
 
-// RegionCodes lists the region codes in display order.
-var RegionCodes = []string{"us", "eu", "au", "me", "in", "sg"}
+// RegionCodes returns the region codes in display order (a fresh slice).
+func RegionCodes() []string {
+	return slices.Clone(regionCodes)
+}
+
+// RegionBaseURL maps a region code to its Konnect API base URL.
+func RegionBaseURL(code string) (string, bool) {
+	u, ok := regions[code]
+	return u, ok
+}
 
 const (
 	// maxPages caps pagination per resource type, guarding against runaway
@@ -49,18 +63,23 @@ const (
 	pageTimeout = 30 * time.Second
 	// maxErrorBody truncates error bodies in messages.
 	maxErrorBody = 1024
+	// maxResponseBytes caps how much of a response body is read into memory.
+	maxResponseBytes = 64 << 20 // 64 MiB
 	// defaultPageSize is the page size requested from the list endpoints.
 	defaultPageSize = 100
 )
 
 var (
-	uuidRe   = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	bearerRe = regexp.MustCompile(`(?i)Bearer\s+\S+`)
+	// Kong personal access tokens may appear bare in URLs or error text.
+	kpatRe = regexp.MustCompile(`kpat_[A-Za-z0-9_-]+`)
 )
 
-// RedactBearer replaces any Bearer token in s with a placeholder.
+// RedactBearer replaces Bearer credentials and bare Kong PATs in s with a
+// placeholder so tokens never reach logs, errors, or MCP tool results.
 func RedactBearer(s string) string {
-	return bearerRe.ReplaceAllString(s, "Bearer [REDACTED]")
+	s = bearerRe.ReplaceAllString(s, "Bearer [REDACTED]")
+	return kpatRe.ReplaceAllString(s, "[REDACTED]")
 }
 
 // APIError is returned when the Konnect API responds with a non-2xx status.
@@ -83,12 +102,34 @@ type Options struct {
 
 // Client talks to the Konnect API. The zero value is ready to use.
 type Client struct {
-	// HTTP is the HTTP client (defaults to http.DefaultClient).
+	// HTTP is the HTTP client (defaults to DefaultHTTPClient).
 	HTTP *http.Client
 	// BaseURLs overrides the region → base URL mapping (used in tests).
 	BaseURLs map[string]string
 	// Sleep waits between retries (defaults to a context-aware sleep).
 	Sleep func(ctx context.Context, d time.Duration) error
+}
+
+// DefaultHTTPClient is a dedicated client with connection pooling and
+// keep-alives sized for concurrent Konnect fetches (routes + services in
+// parallel against one or two hosts). Prefer it over http.DefaultClient,
+// which shares a package-global transport with unrelated callers.
+var DefaultHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+	// Overall request ceiling; per-request context timeouts still apply.
+	Timeout: 60 * time.Second,
 }
 
 // FetchKonnectConfig fetches all routes and services of a control plane using
@@ -116,11 +157,11 @@ func (c *Client) FetchKonnectConfig(ctx context.Context, cfg model.KonnectConfig
 	}
 	baseURL, ok := c.baseURLs()[region]
 	if !ok {
-		return nil, fmt.Errorf(`Unknown region "%s". Valid regions – %s`, region, strings.Join(RegionCodes, ", "))
+		return nil, fmt.Errorf(`Unknown region "%s". Valid regions – %s`, region, strings.Join(RegionCodes(), ", "))
 	}
 
 	// Validate before interpolating into URLs to rule out path injection.
-	if !uuidRe.MatchString(cfg.ControlPlaneID) {
+	if !strutil.IsUUID(cfg.ControlPlaneID) {
 		return nil, fmt.Errorf(`Invalid controlPlaneId: "%s" is not a UUID. Expected format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`, cfg.ControlPlaneID)
 	}
 	cpID := url.PathEscape(cfg.ControlPlaneID)
@@ -179,14 +220,14 @@ func (c *Client) baseURLs() map[string]string {
 	if c.BaseURLs != nil {
 		return c.BaseURLs
 	}
-	return Regions
+	return regions
 }
 
 func (c *Client) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return DefaultHTTPClient
 }
 
 func (c *Client) sleep(ctx context.Context, d time.Duration) error {
@@ -331,7 +372,9 @@ func (c *Client) get(ctx context.Context, rawURL, token string) (int, http.Heade
 		return 0, nil, nil, errors.New(RedactBearer(err.Error()))
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
+	// Cap how much we buffer so a hostile or misbehaving endpoint cannot
+	// exhaust memory; maxResponseBytes still leaves room for large pages.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		body = []byte("(unreadable body)")
 	}
