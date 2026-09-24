@@ -59,8 +59,6 @@ const (
 	maxPages = 200
 	// maxRetries is how often a retryable error (429 / 503) is retried.
 	maxRetries = 3
-	// pageTimeout bounds each page request.
-	pageTimeout = 30 * time.Second
 	// maxErrorBody truncates error bodies in messages.
 	maxErrorBody = 1024
 	// maxResponseBytes caps how much of a response body is read into memory.
@@ -68,6 +66,12 @@ const (
 	// defaultPageSize is the page size requested from the list endpoints.
 	defaultPageSize = 100
 )
+
+// pageTimeout bounds one whole fetchPage call — every retry attempt plus its
+// backoff sleep, not each attempt individually — and one detectRouterFlavor
+// request. A var (not a const) so tests can shrink it instead of waiting out
+// the real 30s.
+var pageTimeout = 30 * time.Second
 
 var (
 	bearerRe = regexp.MustCompile(`(?i)Bearer\s+\S+`)
@@ -331,7 +335,16 @@ func fetchAll[T any](ctx context.Context, c *Client, baseURL, token, label strin
 // fetchPage GETs one page, retrying 429 and 503 responses (honouring
 // Retry-After, else exponential backoff of 1s, 2s, 4s). Other errors fail
 // immediately.
+//
+// The whole call — every attempt plus its backoff sleep — shares a single
+// pageTimeout deadline, mirroring the TS original's one AbortController per
+// fetchPage call. A fresh per-attempt timeout would let up to maxRetries+1
+// attempts each burn a full pageTimeout, multiplying the worst case (with
+// maxRetries=3, up to ~4x pageTimeout plus backoff instead of one hard
+// ceiling).
 func (c *Client) fetchPage(ctx context.Context, rawURL, token string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, pageTimeout)
+	defer cancel()
 	for attempt := 0; ; attempt++ {
 		status, header, body, err := c.get(ctx, rawURL, token)
 		if err != nil {
@@ -367,9 +380,11 @@ func (c *Client) fetchPage(ctx context.Context, rawURL, token string, out any) e
 	}
 }
 
+// get performs a single GET request. Callers that need a deadline (fetchPage
+// bounds its whole retry loop; detectRouterFlavor bounds its single request)
+// apply their own context.WithTimeout — get itself does not, so it does not
+// silently re-arm a fresh timeout for every attempt of a retry loop.
 func (c *Client) get(ctx context.Context, rawURL, token string) (int, http.Header, []byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, pageTimeout)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, nil, nil, err
@@ -411,6 +426,8 @@ func parseRetryAfter(h string, now time.Time) (time.Duration, bool) {
 // endpoint. It is best-effort: dedicated/self-managed control planes expose
 // the field, serverless ones do not, and any failure yields "".
 func (c *Client) detectRouterFlavor(ctx context.Context, baseURL, cpID, token string) model.RouterFlavor {
+	ctx, cancel := context.WithTimeout(ctx, pageTimeout)
+	defer cancel()
 	status, _, body, err := c.get(ctx, baseURL+"/v2/control-planes/"+cpID, token)
 	if err != nil || status < 200 || status >= 300 {
 		return ""
