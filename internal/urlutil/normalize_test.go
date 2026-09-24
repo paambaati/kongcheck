@@ -105,5 +105,36 @@ func TestNormalizePath(t *testing.T) {
 				}
 			})
 		})
+
+		// Multiple leading slashes are a known reverse-proxy path-confusion /
+		// WAF-bypass technique. Kong's own normalization is WHATWG-based, so
+		// kongcheck must resolve them the same way `new URL()` does (verified
+		// against Node): consume ALL leading slashes as authority-slashes,
+		// not just exactly two, and treat an authority with a wholly empty
+		// remainder as an unparseable reference — falling back to the raw,
+		// completely unprocessed input, exactly like the TS original's
+		// try/catch around `new URL()`.
+		t.Run("3+ leading slashes (reverse-proxy path confusion)", func(t *testing.T) {
+			cases := []struct {
+				name string
+				in   string
+				want string
+			}{
+				{"exactly two leading slashes: host consumes up to the next '/'", "//a/b", "/b"},
+				{"exactly two leading slashes, no further '/': empty path defaults to root", "//a", "/"},
+				{"three leading slashes: still just an empty host, same as two", "///a/b", "/b"},
+				{"three leading slashes, no further '/': empty path defaults to root", "///a", "/"},
+				{"four leading slashes: host is the run after the slashes", "////a", "/"},
+				{"three slashes and nothing else: unparseable, returns raw input", "///", "///"},
+				{"four slashes and nothing else: unparseable, returns raw input", "////", "////"},
+			}
+			for _, c := range cases {
+				t.Run(c.name, func(t *testing.T) {
+					if got := urlutil.NormalizePath(c.in); got != c.want {
+						t.Errorf("NormalizePath(%q) = %q, want %q", c.in, got, c.want)
+					}
+				})
+			}
+		})
 	})
 }

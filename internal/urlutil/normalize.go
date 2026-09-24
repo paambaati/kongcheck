@@ -40,8 +40,22 @@ func NormalizePath(raw string) string {
 	s = strings.ReplaceAll(s, `\`, "/")
 
 	// A scheme-relative reference ("//host/path") carries an authority.
+	// WHATWG's "special authority slashes state" tolerates (and consumes)
+	// any number of leading slashes here, not just exactly two — e.g.
+	// "///admin" is parsed the same as "//admin" (empty host, path
+	// "/admin"), and "////a" the same as "//a" (host "a", empty path). This
+	// matters because 3+ leading slashes is a known reverse-proxy path-
+	// confusion technique. For a special scheme (http, as used by our
+	// throwaway base), an authority with an empty host — nothing at all
+	// left after consuming the slashes — is a hard parse failure; WHATWG's
+	// `new URL()` throws, and the reference TypeScript implementation
+	// catches that and returns the original input completely unprocessed
+	// rather than guessing at a partial normalization.
 	if strings.HasPrefix(s, "//") {
-		rest := s[2:]
+		rest := strings.TrimLeft(s, "/")
+		if rest == "" {
+			return raw
+		}
 		if i := strings.IndexByte(rest, '/'); i >= 0 {
 			s = rest[i:]
 		} else {
