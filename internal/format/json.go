@@ -124,10 +124,22 @@ func CSV(findings []*model.Finding, ctx *KonnectContext) string {
 				f.WinnerID, samples, reason, suggestions, RouteURL(r.ID, ctx),
 			}
 			for i, v := range fields {
-				fields[i] = `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
+				fields[i] = csvQuoted(v)
 			}
 			rows = append(rows, strings.Join(fields, ","))
 		}
 	}
 	return strings.Join(rows, "\n")
+}
+
+// csvQuoted quotes a CSV field per RFC 4180 and prefixes formula-like values
+// with `'` so spreadsheets do not execute them (OWASP CSV injection).
+func csvQuoted(v string) string {
+	if v != "" {
+		switch v[0] {
+		case '=', '+', '-', '@', '\t', '\r':
+			v = "'" + v
+		}
+	}
+	return `"` + strings.ReplaceAll(v, `"`, `""`) + `"`
 }

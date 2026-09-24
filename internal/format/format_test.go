@@ -105,6 +105,31 @@ func TestFormatters(t *testing.T) {
 		}
 	})
 
+	t.Run("CSV formula injection is neutralized", func(t *testing.T) {
+		evil := []*model.Finding{{
+			Severity:     model.SeverityHigh,
+			Type:         model.FindingCollision,
+			RouterFlavor: model.FlavorTraditional,
+			Routes: []*model.KongRoute{{
+				ID:    "=cmd|'/c calc'!A0",
+				Name:  "+SUM(A1:A9)",
+				Paths: []string{"@SUM(1+1)"},
+			}},
+			Reason: []string{"-1+2"},
+		}}
+		out := format.CSV(evil, nil)
+		for _, bad := range []string{`"=cmd`, `"+SUM`, `"@SUM`, `"-1+2`} {
+			if strings.Contains(out, bad) {
+				t.Errorf("CSV field must be ' prefixed before quoting; found %s in:\n%s", bad, out)
+			}
+		}
+		for _, good := range []string{`"'=cmd`, `'+SUM`, `'@SUM`, `'-1+2`} {
+			if !strings.Contains(out, good) {
+				t.Errorf("expected neutralized field %s in:\n%s", good, out)
+			}
+		}
+	})
+
 	t.Run("Human format", func(t *testing.T) {
 		human := format.Human(findings, model.FlavorTraditional, ctx, format.HumanOptions{
 			Color:      false,
