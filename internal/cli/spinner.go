@@ -31,6 +31,12 @@ func (s *spinner) Start(text string) {
 		return
 	}
 	s.mu.Lock()
+	if s.stop != nil {
+		// Already running: update text and return without leaking goroutines.
+		s.text = text
+		s.mu.Unlock()
+		return
+	}
 	s.text = text
 	stop, done := make(chan struct{}), make(chan struct{})
 	s.stop, s.done = stop, done

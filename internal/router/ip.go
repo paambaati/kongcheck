@@ -1,7 +1,8 @@
 package router
 
 import (
-	"strconv"
+	"encoding/binary"
+	"net/netip"
 	"strings"
 
 	"github.com/paambaati/kongcheck/internal/model"
@@ -13,20 +14,12 @@ import (
 // Building block for the CIDR checks that mirror lua-resty-ipmatcher as used
 // by Kong's `create_range_f` (traditional.lua ~L279-L284).
 func ParseIPv4(ip string) (uint32, bool) {
-	parts := strings.Split(ip, ".")
-	if len(parts) != 4 {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || !addr.Is4() {
 		return 0, false
 	}
-	var result uint32
-	for _, part := range parts {
-		n, ok := parseDecimal(part, 255)
-		if !ok {
-			return 0, false
-		}
-		// #nosec G115 -- n is bounded to [0, 255] by parseDecimal.
-		result = result<<8 | uint32(n)
-	}
-	return result, true
+	b := addr.As4()
+	return binary.BigEndian.Uint32(b[:]), true
 }
 
 // CIDRToRange parses an IPv4 CIDR (e.g. "10.0.0.0/8") into an inclusive
@@ -34,36 +27,18 @@ func ParseIPv4(ip string) (uint32, bool) {
 // out-of-range prefix length. Callers treat false as "unknown" and assume a
 // potential overlap rather than risk a false negative.
 func CIDRToRange(cidr string) (lo, hi uint32, ok bool) {
-	host, prefixStr, found := strings.Cut(cidr, "/")
-	if !found {
+	prefix, err := netip.ParsePrefix(cidr)
+	if err != nil || !prefix.Addr().Is4() {
 		return 0, 0, false
 	}
-	prefix, ok := parseDecimal(prefixStr, 32)
-	if !ok {
-		return 0, 0, false
-	}
-	hostInt, ok := ParseIPv4(host)
-	if !ok {
-		return 0, 0, false
-	}
+	bits := prefix.Bits()
 	var mask uint32
-	if prefix > 0 {
-		mask = ^uint32(0) << (32 - prefix)
+	if bits > 0 {
+		mask = ^uint32(0) << (32 - bits)
 	}
-	lo = hostInt & mask
+	b := prefix.Masked().Addr().As4()
+	lo = binary.BigEndian.Uint32(b[:])
 	return lo, lo | ^mask, true
-}
-
-// parseDecimal parses a non-empty run of ASCII digits no greater than limit.
-func parseDecimal(s string, limit int) (int, bool) {
-	if s == "" || strings.TrimLeft(s, "0123456789") != "" {
-		return 0, false
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n > limit {
-		return 0, false
-	}
-	return n, true
 }
 
 // ipRange resolves a plain IPv4 address or CIDR to an inclusive range.
@@ -119,13 +94,33 @@ func matchSrcDstEntry(entry model.IPPort, reqIP string, reqPort *int) bool {
 	case entry.IP == "":
 		// No IP constraint.
 	case strings.Contains(entry.IP, "/"):
-		lo, hi, ok := CIDRToRange(entry.IP)
-		ip, ipOK := ParseIPv4(reqIP)
-		if !ok || !ipOK || ip < lo || ip > hi {
+		if prefix, err := netip.ParsePrefix(entry.IP); err == nil {
+			if ip, err := netip.ParseAddr(reqIP); err == nil {
+				if !prefix.Contains(ip) {
+					return false
+				}
+			} else {
+				return false
+			}
+		} else {
+			lo, hi, ok := CIDRToRange(entry.IP)
+			ip, ipOK := ParseIPv4(reqIP)
+			if !ok || !ipOK || ip < lo || ip > hi {
+				return false
+			}
+		}
+	default:
+		if entryAddr, err := netip.ParseAddr(entry.IP); err == nil {
+			if reqAddr, err := netip.ParseAddr(reqIP); err == nil {
+				if entryAddr != reqAddr {
+					return false
+				}
+			} else if entry.IP != reqIP {
+				return false
+			}
+		} else if entry.IP != reqIP {
 			return false
 		}
-	case entry.IP != reqIP:
-		return false
 	}
 	return entry.Port == 0 || (reqPort != nil && entry.Port == *reqPort)
 }
