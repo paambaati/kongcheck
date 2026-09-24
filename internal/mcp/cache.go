@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/paambaati/kongcheck/internal/model"
 	"github.com/paambaati/kongcheck/internal/router"
 	"github.com/paambaati/kongcheck/internal/strutil"
@@ -53,6 +55,7 @@ type CacheEntry struct {
 type Cache struct {
 	mu      sync.Mutex
 	entries map[string]*CacheEntry
+	g       singleflight.Group
 	// Now returns the current time (overridable in tests).
 	Now func() time.Time
 }
@@ -70,6 +73,7 @@ func CacheKey(cfg model.KonnectConfig) string {
 // Fetch returns cached data when an entry exists and is younger than ttl;
 // otherwise it calls fetch and stores the result, evicting other expired
 // entries so stale data does not linger. A ttl <= 0 bypasses the cache.
+// Concurrent calls for the same key are coalesced via singleflight.
 func (c *Cache) Fetch(ctx context.Context, cfg model.KonnectConfig, ttl time.Duration, fetch FetchFunc) (*model.KonnectData, error) {
 	if ttl <= 0 {
 		return fetch(ctx, cfg)
@@ -84,24 +88,35 @@ func (c *Cache) Fetch(ctx context.Context, cfg model.KonnectConfig, ttl time.Dur
 	}
 	c.mu.Unlock()
 
-	data, err := fetch(ctx, cfg)
+	v, err, _ := c.g.Do(key, func() (any, error) {
+		// Double check under lock in case another goroutine fetched while waiting.
+		c.mu.Lock()
+		if e, ok := c.entries[key]; ok && c.Now().Sub(e.FetchedAt) < ttl {
+			c.mu.Unlock()
+			return e.Data, nil
+		}
+		c.mu.Unlock()
+
+		data, err := fetch(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+
+		fetchedAt := c.Now()
+		c.mu.Lock()
+		c.entries[key] = &CacheEntry{Data: data, FetchedAt: fetchedAt}
+		for k, e := range c.entries {
+			if k != key && fetchedAt.Sub(e.FetchedAt) >= ttl {
+				delete(c.entries, k)
+			}
+		}
+		c.mu.Unlock()
+		return data, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	// Stamp after the fetch returns so TTL is measured from when the data
-	// actually landed, not from when the request started (slow fetches would
-	// otherwise look older than they are).
-	fetchedAt := c.Now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[key] = &CacheEntry{Data: data, FetchedAt: fetchedAt}
-	for k, e := range c.entries {
-		if k != key && fetchedAt.Sub(e.FetchedAt) >= ttl {
-			delete(c.entries, k)
-		}
-	}
-	return data, nil
+	return v.(*model.KonnectData), nil
 }
 
 // Set stores an entry directly (used to seed the cache in tests).

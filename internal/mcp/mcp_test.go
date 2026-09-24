@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/paambaati/kongcheck/internal/mcp"
 	"github.com/paambaati/kongcheck/internal/model"
 )
@@ -348,5 +350,126 @@ func TestFetchKonnectConfigCached(t *testing.T) {
 				t.Errorf("a non-expired entry for a different key must not be evicted: Has(%q) = %v, want true", "eu:cp-other", got)
 			}
 		})
+	})
+}
+
+func TestMCPServer_Tools(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("KONNECT_TOKEN", "kpat_test_secret")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	s := mcp.New(mcp.Options{
+		Name:    "kongcheck-test",
+		Version: "1.0.0",
+		Fetch: func(_ context.Context, cfg model.KonnectConfig) (*model.KonnectData, error) {
+			routes := []*model.KongRoute{
+				{
+					ID:    "r1",
+					Name:  "route-1",
+					Paths: []string{"/api/v1"},
+				},
+				{
+					ID:    "r2",
+					Name:  "route-2",
+					Paths: []string{"/api/v1/child"},
+				},
+			}
+			return &model.KonnectData{
+				Routes:         routes,
+				Services:       model.NewServiceIndex(),
+				RouterFlavor:   model.FlavorTraditional,
+				ControlPlaneID: cfg.ControlPlaneID,
+				Region:         cfg.Region,
+			}, nil
+		},
+	})
+
+	serverTransport, clientTransport := sdk.NewInMemoryTransports()
+	go func() {
+		_ = s.Run(ctx, serverTransport)
+	}()
+
+	client := sdk.NewClient(&sdk.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect: %v", err)
+	}
+	defer session.Close()
+
+	t.Run("list tools", func(t *testing.T) {
+		toolsRes, err := session.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("ListTools: %v", err)
+		}
+		if len(toolsRes.Tools) != 4 {
+			t.Errorf("expected 4 tools, got %d", len(toolsRes.Tools))
+		}
+	})
+
+	t.Run("call analyze_routes", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &sdk.CallToolParams{
+			Name: "analyze_routes",
+			Arguments: map[string]any{
+				"controlPlaneId": "11111111-1111-1111-1111-111111111111",
+				"region":         "us",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool analyze_routes: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error in analyze_routes: %+v", res)
+		}
+	})
+
+	t.Run("call get_collisions", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &sdk.CallToolParams{
+			Name: "get_collisions",
+			Arguments: map[string]any{
+				"controlPlaneId": "11111111-1111-1111-1111-111111111111",
+				"region":         "us",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool get_collisions: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error in get_collisions: %+v", res)
+		}
+	})
+
+	t.Run("call explain_request", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &sdk.CallToolParams{
+			Name: "explain_request",
+			Arguments: map[string]any{
+				"controlPlaneId": "11111111-1111-1111-1111-111111111111",
+				"region":         "us",
+				"path":           "/api/v1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool explain_request: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error in explain_request: %+v", res)
+		}
+	})
+
+	t.Run("call get_route_config", func(t *testing.T) {
+		res, err := session.CallTool(ctx, &sdk.CallToolParams{
+			Name: "get_route_config",
+			Arguments: map[string]any{
+				"controlPlaneId": "11111111-1111-1111-1111-111111111111",
+				"region":         "us",
+			},
+		})
+		if err != nil {
+			t.Fatalf("CallTool get_route_config: %v", err)
+		}
+		if res.IsError {
+			t.Fatalf("unexpected tool error in get_route_config: %+v", res)
+		}
 	})
 }

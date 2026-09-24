@@ -1,17 +1,16 @@
 package mcp
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"strings"
-	"sync"
 	"time"
+
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/paambaati/kongcheck/internal/analyzer"
 	"github.com/paambaati/kongcheck/internal/client"
@@ -28,25 +27,6 @@ const instructions = "kongcheck audits Kong Konnect route configurations for col
 	"simulate a specific HTTP or TCP/TLS stream request, and get_route_config " +
 	"to inspect the raw route/service data."
 
-// Tool represents a registered MCP tool.
-type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
-	handler     func(ctx context.Context, arguments json.RawMessage) (string, error)
-}
-
-// Server holds the state and tool handlers of an MCP server session.
-type Server struct {
-	name     string
-	version  string
-	cache    *Cache
-	cacheTTL time.Duration
-	fetch    FetchFunc
-	tools    []Tool
-	toolMap  map[string]Tool
-}
-
 // Options configures the MCP server.
 type Options struct {
 	// Name and Version identify the server to clients.
@@ -57,15 +37,20 @@ type Options struct {
 	Fetch FetchFunc
 }
 
-// New builds the MCP server with all tools registered.
+// Server wraps the official MCP SDK server with kongcheck tools and caching.
+type Server struct {
+	sdkServer *sdk.Server
+	cache     *Cache
+	cacheTTL  time.Duration
+	fetch     FetchFunc
+}
+
+// New builds the MCP server with all tools registered using the official MCP Go SDK.
 func New(opts Options) *Server {
 	s := &Server{
-		name:     opts.Name,
-		version:  opts.Version,
 		cache:    NewCache(),
 		cacheTTL: opts.CacheTTL,
 		fetch:    opts.Fetch,
-		toolMap:  make(map[string]Tool),
 	}
 	if s.fetch == nil {
 		s.fetch = func(ctx context.Context, cfg model.KonnectConfig) (*model.KonnectData, error) {
@@ -73,224 +58,84 @@ func New(opts Options) *Server {
 		}
 	}
 
-	s.addTool(Tool{
+	impl := &sdk.Implementation{
+		Name:    opts.Name,
+		Version: opts.Version,
+	}
+	sdkServer := sdk.NewServer(impl, &sdk.ServerOptions{
+		Instructions: instructions,
+	})
+	s.sdkServer = sdkServer
+
+	sdk.AddTool(sdkServer, &sdk.Tool{
 		Name:        "analyze_routes",
 		Description: "Run a full four-pass audit of a Konnect control plane: suspicious regex paths, route collisions, shadowing, and (optionally) universal catch-all routes.",
-		InputSchema: analyzeSchema,
-		handler:     s.handleAnalyze,
-	})
-	s.addTool(Tool{
+	}, s.handleAnalyze)
+
+	sdk.AddTool(sdkServer, &sdk.Tool{
 		Name:        "get_collisions",
 		Description: "Return only shadowing and collision findings for a Konnect control plane. Excludes suspicious-regex findings.",
-		InputSchema: collisionsSchema,
-		handler:     s.handleCollisions,
-	})
-	s.addTool(Tool{
+	}, s.handleCollisions)
+
+	sdk.AddTool(sdkServer, &sdk.Tool{
 		Name:        "explain_request",
 		Description: "Simulate a specific HTTP or TCP/TLS stream request against a Konnect control plane and return the winning route with a step-by-step explanation of why it won. For stream routes, supply sni / sourceIp / sourcePort / destIp / destPort as needed. When an L4 field is omitted, the corresponding route constraint is skipped (conservative mode: every route is a candidate). The path is normalised before matching: query strings and fragments are stripped and dot-segments are resolved.",
-		InputSchema: explainSchema,
-		handler:     s.handleExplain,
-	})
-	s.addTool(Tool{
+	}, s.handleExplain)
+
+	sdk.AddTool(sdkServer, &sdk.Tool{
 		Name:        "get_route_config",
 		Description: "Fetch the raw routes and services from a Konnect control plane as structured data. Useful when the agent needs to inspect or reason about the full route list directly.",
-		InputSchema: routeConfigSchema,
-		handler:     s.handleRouteConfig,
-	})
+	}, s.handleRouteConfig)
+
 	return s
 }
 
-func (s *Server) addTool(t Tool) {
-	s.tools = append(s.tools, t)
-	s.toolMap[t.Name] = t
+// Run runs the MCP server on transport.
+func (s *Server) Run(ctx context.Context, transport sdk.Transport) error {
+	return s.sdkServer.Run(ctx, transport)
 }
 
-// Serve runs the MCP server over stdio until stdin EOF or context cancellation.
-// The context is threaded into every tool handler (and thus Konnect fetches)
-// so SIGINT/cancellation aborts in-flight work.
+// Serve runs the MCP server over stdio until EOF or context cancellation.
 func Serve(ctx context.Context, opts Options) error {
 	s := New(opts)
-	return s.ServeIO(ctx, os.Stdin, os.Stdout)
+	return s.sdkServer.Run(ctx, &sdk.StdioTransport{})
 }
 
-// JSON-RPC 2.0 messages
-type jsonRPCMessage struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
-	Result  any             `json:"result,omitempty"`
-	Error   *jsonRPCError   `json:"error,omitempty"`
-}
-
-type jsonRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// ServeIO runs the JSON-RPC loop reading from in and writing to out.
-// Cancelling ctx stops between messages and aborts in-flight tool handlers;
-// blocked reads on in only end when the reader returns (stdin EOF or close).
+// ServeIO runs the MCP server using separate reader and writer (used in tests).
 func (s *Server) ServeIO(ctx context.Context, in io.Reader, out io.Writer) error {
-	scanner := bufio.NewScanner(in)
-	// Allow large messages up to 16MB
-	buf := make([]byte, 64*1024)
-	scanner.Buffer(buf, 16*1024*1024)
-
-	var mu sync.Mutex
-	send := func(resp *jsonRPCMessage) error {
-		b, err := json.Marshal(resp)
-		if err != nil {
-			return err
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		_, err = fmt.Fprintf(out, "%s\n", b)
-		return err
-	}
-
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-
-		var req jsonRPCMessage
-		if err := json.Unmarshal(line, &req); err != nil {
-			// JSON-RPC requires id: null when the id cannot be parsed.
-			_ = send(&jsonRPCMessage{
-				JSONRPC: "2.0",
-				ID:      json.RawMessage("null"),
-				Error:   &jsonRPCError{Code: -32700, Message: "Parse error"},
-			})
-			continue
-		}
-
-		// Notifications have no ID
-		isNotification := len(req.ID) == 0 || bytes.Equal(req.ID, []byte("null"))
-
-		switch req.Method {
-		case "initialize":
-			_ = send(&jsonRPCMessage{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]any{
-					// Fixed protocol revision we implement; clients negotiate
-					// down via their own protocolVersion if needed.
-					"protocolVersion": "2025-06-18",
-					"capabilities": map[string]any{
-						"tools": map[string]any{"listChanged": true},
-					},
-					"serverInfo": map[string]any{
-						"name":    s.name,
-						"version": s.version,
-					},
-					"instructions": instructions,
-				},
-			})
-
-		case "notifications/initialized":
-			// Handshake acknowledgement notification, no response required.
-
-		case "ping":
-			if !isNotification {
-				_ = send(&jsonRPCMessage{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Result:  map[string]any{},
-				})
-			}
-
-		case "tools/list":
-			toolList := make([]map[string]any, len(s.tools))
-			for i, t := range s.tools {
-				toolList[i] = map[string]any{
-					"name":        t.Name,
-					"description": t.Description,
-					"inputSchema": t.InputSchema,
-				}
-			}
-			_ = send(&jsonRPCMessage{
-				JSONRPC: "2.0",
-				ID:      req.ID,
-				Result: map[string]any{
-					"tools": toolList,
-				},
-			})
-
-		case "tools/call":
-			var callParams struct {
-				Name      string          `json:"name"`
-				Arguments json.RawMessage `json:"arguments"`
-			}
-			if err := json.Unmarshal(req.Params, &callParams); err != nil {
-				_ = send(&jsonRPCMessage{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error:   &jsonRPCError{Code: -32602, Message: "Invalid params"},
-				})
-				continue
-			}
-
-			tool, exists := s.toolMap[callParams.Name]
-			if !exists {
-				_ = send(&jsonRPCMessage{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error:   &jsonRPCError{Code: -32601, Message: fmt.Sprintf("Tool not found: %s", callParams.Name)},
-				})
-				continue
-			}
-
-			text, err := tool.handler(ctx, callParams.Arguments)
-			if err != nil {
-				errText, _ := toJSON(map[string]string{"error": client.RedactBearer(err.Error())})
-				_ = send(&jsonRPCMessage{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Result: map[string]any{
-						"content": []map[string]any{
-							{"type": "text", "text": errText},
-						},
-						"isError": true,
-					},
-				})
-			} else {
-				_ = send(&jsonRPCMessage{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Result: map[string]any{
-						"content": []map[string]any{
-							{"type": "text", "text": text},
-						},
-					},
-				})
-			}
-
-		default:
-			if !isNotification {
-				_ = send(&jsonRPCMessage{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error:   &jsonRPCError{Code: -32601, Message: fmt.Sprintf("Method not found: %s", req.Method)},
-				})
-			}
-		}
-	}
-	return scanner.Err()
+	return s.sdkServer.Run(ctx, &sdk.IOTransport{
+		Reader: toReadCloser(in),
+		Writer: toWriteCloser(out),
+	})
 }
 
-// --- arguments & validation -------------------------------------------------
-
-type targetArgs struct {
-	ControlPlaneID string `json:"controlPlaneId"`
-	Region         string `json:"region"`
+type nopWriteCloser struct {
+	io.Writer
 }
 
-func (a targetArgs) validate() error {
+func (nopWriteCloser) Close() error { return nil }
+
+func toReadCloser(r io.Reader) io.ReadCloser {
+	if rc, ok := r.(io.ReadCloser); ok {
+		return rc
+	}
+	return io.NopCloser(r)
+}
+
+func toWriteCloser(w io.Writer) io.WriteCloser {
+	if wc, ok := w.(io.WriteCloser); ok {
+		return wc
+	}
+	return nopWriteCloser{Writer: w}
+}
+
+// TargetArgs are the common connection parameters.
+type TargetArgs struct {
+	ControlPlaneID string `json:"controlPlaneId,omitempty" jsonschema:"UUID of the Konnect control plane to inspect. Falls back to KONNECT_CONTROL_PLANE_ID env var."`
+	Region         string `json:"region,omitempty" jsonschema:"Konnect region (us, eu, au, me, in, sg). Defaults to KONNECT_REGION env var or 'us'."`
+}
+
+func (a TargetArgs) validate() error {
 	if a.ControlPlaneID != "" && !strutil.IsUUID(a.ControlPlaneID) {
 		return fmt.Errorf("controlPlaneId: invalid UUID %q", a.ControlPlaneID)
 	}
@@ -300,20 +145,22 @@ func (a targetArgs) validate() error {
 	return nil
 }
 
-type filterArg struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
+// FilterArg is one attribute filter.
+type FilterArg struct {
+	Key   string `json:"key" jsonschema:"Attribute to filter on: path, name, service, tag, id."`
+	Value string `json:"value" jsonschema:"Substring to match against (case-insensitive)."`
 }
 
-type analysisArgs struct {
-	targetArgs
-	Flavor      string      `json:"flavor"`
-	IncludeInfo bool        `json:"includeInfo"`
-	Filter      []filterArg `json:"filter"`
+// AnalysisArgs are arguments for analyze_routes.
+type AnalysisArgs struct {
+	TargetArgs
+	Flavor      string      `json:"flavor,omitempty" jsonschema:"Override router flavor: traditional, traditional_compatible, expressions."`
+	IncludeInfo bool        `json:"includeInfo,omitempty" jsonschema:"Include INFO-level findings. Default: false."`
+	Filter      []FilterArg `json:"filter,omitempty" jsonschema:"Filter findings by route attributes."`
 }
 
-func (a analysisArgs) validate() error {
-	if err := a.targetArgs.validate(); err != nil {
+func (a AnalysisArgs) validate() error {
+	if err := a.TargetArgs.validate(); err != nil {
 		return err
 	}
 	if a.Flavor != "" && model.ParseFlavor(a.Flavor) == "" {
@@ -322,7 +169,7 @@ func (a analysisArgs) validate() error {
 	return nil
 }
 
-func (a analysisArgs) predicates() ([]filter.Predicate, error) {
+func (a AnalysisArgs) predicates() ([]filter.Predicate, error) {
 	raw := make([]string, len(a.Filter))
 	for i, f := range a.Filter {
 		raw[i] = f.Key + ":" + f.Value
@@ -330,32 +177,61 @@ func (a analysisArgs) predicates() ([]filter.Predicate, error) {
 	return filter.ParseAll(raw)
 }
 
-type explainArgs struct {
-	targetArgs
-	Flavor     string            `json:"flavor"`
-	Method     string            `json:"method"`
-	Host       string            `json:"host"`
-	Path       *string           `json:"path"`
-	Headers    map[string]string `json:"headers"`
-	SNI        *string           `json:"sni"`
-	SourceIP   *string           `json:"sourceIp"`
-	SourcePort *float64          `json:"sourcePort"`
-	DestIP     *string           `json:"destIp"`
-	DestPort   *float64          `json:"destPort"`
+// CollisionsArgs are arguments for get_collisions.
+type CollisionsArgs struct {
+	TargetArgs
+	Flavor string      `json:"flavor,omitempty" jsonschema:"Override router flavor: traditional, traditional_compatible, expressions."`
+	Filter []FilterArg `json:"filter,omitempty" jsonschema:"Filter findings by route attributes."`
 }
 
-func portArg(name string, v *float64) (*int, error) {
-	if v == nil {
-		return nil, nil
+func (c CollisionsArgs) toAnalysisArgs() AnalysisArgs {
+	return AnalysisArgs{
+		TargetArgs: c.TargetArgs,
+		Flavor:     c.Flavor,
+		Filter:     c.Filter,
 	}
-	if *v != float64(int(*v)) || *v < 1 || *v > 65535 {
-		return nil, fmt.Errorf("%s: expected an integer between 1 and 65535, got %v", name, *v)
-	}
-	p := int(*v)
-	return &p, nil
 }
 
-func (s *Server) load(ctx context.Context, t targetArgs) (model.KonnectConfig, *model.KonnectData, error) {
+// ExplainArgs are arguments for explain_request.
+type ExplainArgs struct {
+	TargetArgs
+	Flavor     string            `json:"flavor,omitempty" jsonschema:"Override router flavor."`
+	Method     string            `json:"method,omitempty" jsonschema:"HTTP method, e.g. GET. Default: GET."`
+	Host       string            `json:"host,omitempty" jsonschema:"Host header value, e.g. api.example.com. Default: example.com."`
+	Path       string            `json:"path" jsonschema:"Request path, e.g. /api/v1/users."`
+	Headers    map[string]string `json:"headers,omitempty" jsonschema:"Optional request headers as a key/value object."`
+	SNI        *string           `json:"sni,omitempty" jsonschema:"TLS SNI value for stream route simulation."`
+	SourceIP   *string           `json:"sourceIp,omitempty" jsonschema:"Source IP address of the connection."`
+	SourcePort *int              `json:"sourcePort,omitempty" jsonschema:"Source TCP/UDP port (1-65535)."`
+	DestIP     *string           `json:"destIp,omitempty" jsonschema:"Destination IP address."`
+	DestPort   *int              `json:"destPort,omitempty" jsonschema:"Destination TCP/UDP port (1-65535)."`
+}
+
+func (e ExplainArgs) validate() error {
+	if e.Path == "" {
+		return fmt.Errorf("path: required")
+	}
+	if err := e.TargetArgs.validate(); err != nil {
+		return err
+	}
+	if e.Flavor != "" && model.ParseFlavor(e.Flavor) == "" {
+		return fmt.Errorf("flavor: expected one of traditional, traditional_compatible, expressions, got %q", e.Flavor)
+	}
+	if e.SourcePort != nil && (*e.SourcePort < 1 || *e.SourcePort > 65535) {
+		return fmt.Errorf("sourcePort: expected an integer between 1 and 65535, got %d", *e.SourcePort)
+	}
+	if e.DestPort != nil && (*e.DestPort < 1 || *e.DestPort > 65535) {
+		return fmt.Errorf("destPort: expected an integer between 1 and 65535, got %d", *e.DestPort)
+	}
+	return nil
+}
+
+// RouteConfigArgs are arguments for get_route_config.
+type RouteConfigArgs struct {
+	TargetArgs
+}
+
+func (s *Server) load(ctx context.Context, t TargetArgs) (model.KonnectConfig, *model.KonnectData, error) {
 	cfg, err := ResolveConfig(ResolveParams(t))
 	if err != nil {
 		return cfg, nil, err
@@ -374,23 +250,40 @@ func resolveFlavor(requested string, data *model.KonnectData) model.RouterFlavor
 	return model.FlavorTraditional
 }
 
-func (s *Server) handleAnalyze(ctx context.Context, argsRaw json.RawMessage) (string, error) {
-	var args analysisArgs
-	if err := bind(argsRaw, &args); err != nil {
-		return "", err
+func toolSuccess(text string) (*sdk.CallToolResult, any, error) {
+	return &sdk.CallToolResult{
+		Content: []sdk.Content{
+			&sdk.TextContent{Text: text},
+		},
+	}, nil, nil
+}
+
+func toolError(err error) (*sdk.CallToolResult, any, error) {
+	errText, _ := toJSON(map[string]string{"error": client.RedactBearer(err.Error())})
+	return &sdk.CallToolResult{
+		Content: []sdk.Content{
+			&sdk.TextContent{Text: errText},
+		},
+		IsError: true,
+	}, nil, nil
+}
+
+func (s *Server) handleAnalyze(ctx context.Context, _ *sdk.CallToolRequest, args AnalysisArgs) (*sdk.CallToolResult, any, error) {
+	if err := args.validate(); err != nil {
+		return toolError(err)
 	}
-	cfg, data, err := s.load(ctx, args.targetArgs)
+	cfg, data, err := s.load(ctx, args.TargetArgs)
 	if err != nil {
-		return "", err
+		return toolError(err)
 	}
 	flavor := resolveFlavor(args.Flavor, data)
 	preds, err := args.predicates()
 	if err != nil {
-		return "", err
+		return toolError(err)
 	}
 	all := analyzer.Analyze(ctx, data, analyzer.Options{Flavor: flavor, ExcludeInfo: !args.IncludeInfo})
 	findings := filter.Apply(all, preds, data.Services)
-	return toJSON(struct {
+	res, err := toJSON(struct {
 		ControlPlaneID string                `json:"controlPlaneId"`
 		RouterFlavor   model.RouterFlavor    `json:"routerFlavor"`
 		TotalRoutes    int                   `json:"totalRoutes"`
@@ -398,21 +291,25 @@ func (s *Server) handleAnalyze(ctx context.Context, argsRaw json.RawMessage) (st
 		Summary        model.SeveritySummary `json:"summary"`
 		Findings       []*model.Finding      `json:"findings"`
 	}{cfg.ControlPlaneID, flavor, len(data.Routes), len(findings), model.Summarize(findings), findings})
+	if err != nil {
+		return nil, nil, err
+	}
+	return toolSuccess(res)
 }
 
-func (s *Server) handleCollisions(ctx context.Context, argsRaw json.RawMessage) (string, error) {
-	var args analysisArgs
-	if err := bind(argsRaw, &args); err != nil {
-		return "", err
+func (s *Server) handleCollisions(ctx context.Context, _ *sdk.CallToolRequest, args CollisionsArgs) (*sdk.CallToolResult, any, error) {
+	analysisArgs := args.toAnalysisArgs()
+	if err := analysisArgs.validate(); err != nil {
+		return toolError(err)
 	}
-	cfg, data, err := s.load(ctx, args.targetArgs)
+	cfg, data, err := s.load(ctx, args.TargetArgs)
 	if err != nil {
-		return "", err
+		return toolError(err)
 	}
 	flavor := resolveFlavor(args.Flavor, data)
-	preds, err := args.predicates()
+	preds, err := analysisArgs.predicates()
 	if err != nil {
-		return "", err
+		return toolError(err)
 	}
 	var collisions []*model.Finding
 	for _, f := range analyzer.Analyze(ctx, data, analyzer.Options{Flavor: flavor, ExcludeInfo: true}) {
@@ -424,13 +321,17 @@ func (s *Server) handleCollisions(ctx context.Context, argsRaw json.RawMessage) 
 	if findings == nil {
 		findings = []*model.Finding{}
 	}
-	return toJSON(struct {
+	res, err := toJSON(struct {
 		ControlPlaneID string             `json:"controlPlaneId"`
 		RouterFlavor   model.RouterFlavor `json:"routerFlavor"`
 		TotalRoutes    int                `json:"totalRoutes"`
 		TotalFindings  int                `json:"totalFindings"`
 		Findings       []*model.Finding   `json:"findings"`
 	}{cfg.ControlPlaneID, flavor, len(data.Routes), len(findings), findings})
+	if err != nil {
+		return nil, nil, err
+	}
+	return toolSuccess(res)
 }
 
 type routeSummary struct {
@@ -440,36 +341,18 @@ type routeSummary struct {
 	RegexPriority *int     `json:"regex_priority,omitempty"`
 }
 
-func (s *Server) handleExplain(ctx context.Context, argsRaw json.RawMessage) (string, error) {
-	var args explainArgs
-	if err := bind(argsRaw, &args); err != nil {
-		return "", err
+func (s *Server) handleExplain(ctx context.Context, _ *sdk.CallToolRequest, args ExplainArgs) (*sdk.CallToolResult, any, error) {
+	if err := args.validate(); err != nil {
+		return toolError(err)
 	}
-	if args.Path == nil {
-		return "", fmt.Errorf("path: required")
-	}
-	if err := (analysisArgs{targetArgs: args.targetArgs, Flavor: args.Flavor}).validate(); err != nil {
-		return "", err
-	}
-	sourcePort, err := portArg("sourcePort", args.SourcePort)
+	cfg, data, err := s.load(ctx, args.TargetArgs)
 	if err != nil {
-		return "", err
-	}
-	destPort, err := portArg("destPort", args.DestPort)
-	if err != nil {
-		return "", err
-	}
-
-	cfg, data, err := s.load(ctx, args.targetArgs)
-	if err != nil {
-		return "", err
+		return toolError(err)
 	}
 	flavor := resolveFlavor(args.Flavor, data)
 	sorted := s.cache.SortedRoutes(CacheKey(cfg), data, flavor)
 
-	normalized := urlutil.NormalizePath(*args.Path)
-	// HTTP header names are case-insensitive; normalise to lowercase so
-	// constraints keyed lower (or mixed) always resolve, matching the CLI.
+	normalized := urlutil.NormalizePath(args.Path)
 	reqHeaders := args.Headers
 	if reqHeaders != nil {
 		reqHeaders = make(map[string]string, len(args.Headers))
@@ -484,9 +367,9 @@ func (s *Server) handleExplain(ctx context.Context, argsRaw json.RawMessage) (st
 		Headers:    reqHeaders,
 		SNI:        args.SNI,
 		SourceIP:   args.SourceIP,
-		SourcePort: sourcePort,
+		SourcePort: args.SourcePort,
 		DestIP:     args.DestIP,
-		DestPort:   destPort,
+		DestPort:   args.DestPort,
 	})
 
 	var winner *routeSummary
@@ -502,10 +385,10 @@ func (s *Server) handleExplain(ctx context.Context, argsRaw json.RawMessage) (st
 		}
 	}
 	pathNormalized := ""
-	if normalized != *args.Path {
+	if normalized != args.Path {
 		pathNormalized = normalized
 	}
-	return toJSON(struct {
+	resText, err := toJSON(struct {
 		ControlPlaneID     string             `json:"controlPlaneId"`
 		RouterFlavor       model.RouterFlavor `json:"routerFlavor"`
 		Request            router.SimRequest  `json:"request"`
@@ -515,18 +398,21 @@ func (s *Server) handleExplain(ctx context.Context, argsRaw json.RawMessage) (st
 		Explanation        []string           `json:"explanation"`
 		OtherMatchedRoutes []routeSummary     `json:"otherMatchedRoutes"`
 	}{cfg.ControlPlaneID, flavor, res.Request, pathNormalized, res.Winner != nil, winner, res.Explanation(), others})
+	if err != nil {
+		return nil, nil, err
+	}
+	return toolSuccess(resText)
 }
 
-func (s *Server) handleRouteConfig(ctx context.Context, argsRaw json.RawMessage) (string, error) {
-	var args targetArgs
-	if err := bind(argsRaw, &args); err != nil {
-		return "", err
+func (s *Server) handleRouteConfig(ctx context.Context, _ *sdk.CallToolRequest, args RouteConfigArgs) (*sdk.CallToolResult, any, error) {
+	if err := args.validate(); err != nil {
+		return toolError(err)
 	}
-	cfg, data, err := s.load(ctx, args)
+	cfg, data, err := s.load(ctx, args.TargetArgs)
 	if err != nil {
-		return "", err
+		return toolError(err)
 	}
-	return toJSON(struct {
+	res, err := toJSON(struct {
 		ControlPlaneID string               `json:"controlPlaneId"`
 		RouterFlavor   model.RouterFlavor   `json:"routerFlavor,omitempty"`
 		TotalRoutes    int                  `json:"totalRoutes"`
@@ -534,22 +420,10 @@ func (s *Server) handleRouteConfig(ctx context.Context, argsRaw json.RawMessage)
 		Routes         []*model.KongRoute   `json:"routes"`
 		Services       []*model.KongService `json:"services"`
 	}{cfg.ControlPlaneID, data.RouterFlavor, len(data.Routes), data.Services.Len(), data.Routes, data.Services.All()})
-}
-
-// --- helpers --------------------------------------------------------------
-
-type validator interface{ validate() error }
-
-func bind(raw json.RawMessage, target any) error {
-	if len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
-		if err := json.Unmarshal(raw, target); err != nil {
-			return fmt.Errorf("invalid arguments: %w", err)
-		}
+	if err != nil {
+		return nil, nil, err
 	}
-	if v, ok := target.(validator); ok {
-		return v.validate()
-	}
-	return nil
+	return toolSuccess(res)
 }
 
 func toJSON(v any) (string, error) {
