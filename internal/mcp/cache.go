@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"sync"
@@ -51,7 +53,8 @@ type CacheEntry struct {
 }
 
 // Cache is an in-memory, per-session cache of fetched configurations keyed by
-// "region:controlPlaneId". It is safe for concurrent use.
+// region, controlPlaneId, and a token fingerprint (see CacheKey). It is safe
+// for concurrent use.
 type Cache struct {
 	mu      sync.Mutex
 	entries map[string]*CacheEntry
@@ -66,8 +69,23 @@ func NewCache() *Cache {
 }
 
 // CacheKey returns the cache key for a connection config.
+//
+// It incorporates a short fingerprint of the token so cached data fetched
+// with one credential can never be handed back to a request presenting a
+// different one, even when region and controlPlaneId happen to match. This
+// can't happen today — one kongcheck process reads exactly one
+// KONNECT_TOKEN from the environment for its whole lifetime, so there is
+// only ever one implicit tenant per Cache — but keying purely on
+// region:controlPlaneId would be a silent cross-tenant data leak waiting to
+// happen the moment that assumption changes (e.g. a per-call/per-session
+// token override, or a transport serving multiple concurrent client
+// sessions — and hence multiple credentials — from one process). The token
+// itself is hashed rather than included verbatim so it never ends up in a
+// plaintext form in more places than necessary (e.g. a future debug dump of
+// cache keys).
 func CacheKey(cfg model.KonnectConfig) string {
-	return cfg.Region + ":" + cfg.ControlPlaneID
+	sum := sha256.Sum256([]byte(cfg.Token))
+	return cfg.Region + ":" + cfg.ControlPlaneID + ":" + hex.EncodeToString(sum[:8])
 }
 
 // Fetch returns cached data when an entry exists and is younger than ttl;

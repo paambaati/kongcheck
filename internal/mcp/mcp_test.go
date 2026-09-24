@@ -331,8 +331,9 @@ func TestFetchKonnectConfigCached(t *testing.T) {
 			if got := cache.Has("eu:cp-other-2"); got != false {
 				t.Errorf("expired entry for a different key must be evicted on write: Has(%q) = %v, want false", "eu:cp-other-2", got)
 			}
-			if got := cache.Has("us:cp-test"); got != true {
-				t.Errorf("freshly written entry must remain: Has(%q) = %v, want true", "us:cp-test", got)
+			freshKey := mcp.CacheKey(fakeCfg)
+			if got := cache.Has(freshKey); got != true {
+				t.Errorf("freshly written entry must remain: Has(%q) = %v, want true", freshKey, got)
 			}
 		})
 
@@ -351,6 +352,38 @@ func TestFetchKonnectConfigCached(t *testing.T) {
 			}
 		})
 	})
+}
+
+// TestCacheKey_IncorporatesToken guards against a cross-tenant cache leak:
+// CacheKey must not collide for two different tokens against the same
+// region/controlPlaneId, even though that's the only thing that varies.
+// Today one process reads exactly one KONNECT_TOKEN for its whole lifetime,
+// so this can't be triggered in the shipped binary — but the cache key is
+// the only thing standing between "safe" and "Tenant A's cached routes
+// served to Tenant B's request" if a per-call/per-session token override is
+// ever added.
+func TestCacheKey_IncorporatesToken(t *testing.T) {
+	base := model.KonnectConfig{Token: "token-a", ControlPlaneID: "cp-test", Region: "us"}
+	sameTokenAgain := model.KonnectConfig{Token: "token-a", ControlPlaneID: "cp-test", Region: "us"}
+	differentToken := model.KonnectConfig{Token: "token-b", ControlPlaneID: "cp-test", Region: "us"}
+
+	keyA := mcp.CacheKey(base)
+	keyASame := mcp.CacheKey(sameTokenAgain)
+	keyB := mcp.CacheKey(differentToken)
+
+	if keyA != keyASame {
+		t.Errorf("CacheKey must be deterministic for identical configs: %q != %q", keyA, keyASame)
+	}
+	if keyA == keyB {
+		t.Errorf("CacheKey must differ when only the token differs (region/controlPlaneId identical), "+
+			"got the same key %q for both — this would let one tenant's cached data be served to another's request", keyA)
+	}
+	if !strings.HasPrefix(keyA, "us:cp-test:") {
+		t.Errorf("expected CacheKey to still start with region:controlPlaneId, got %q", keyA)
+	}
+	if strings.Contains(keyA, "token-a") {
+		t.Errorf("expected the token fingerprint to be hashed, not embedded verbatim, got %q", keyA)
+	}
 }
 
 func TestMCPServer_Tools(t *testing.T) {
