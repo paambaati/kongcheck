@@ -31,13 +31,13 @@ func TestClient_FetchKonnectConfig(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/core-entities/routes"):
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"data":[{"id":"r1","name":"route-1","paths":["/test"]}],"next":null}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"r1","name":"route-1","paths":["/test"]}],"next":null}`))
 		case strings.HasSuffix(r.URL.Path, "/core-entities/services"):
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"data":[{"id":"s1","name":"service-1"}],"next":null}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"s1","name":"service-1"}],"next":null}`))
 		case strings.Contains(r.URL.Path, "/v2/control-planes/"):
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"config":{"router_flavor":"traditional"}}`))
+			_, _ = w.Write([]byte(`{"config":{"router_flavor":"traditional"}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -73,7 +73,7 @@ func TestClient_LoadLocalConfig(t *testing.T) {
 	tmp := t.TempDir()
 	dumpPath := filepath.Join(tmp, "dump.json")
 	content := `{"routerFlavor":"traditional","routes":[{"id":"r1","paths":["/api"]}],"services":[{"id":"s1","name":"svc"}]}`
-	if err := os.WriteFile(dumpPath, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(dumpPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,11 +102,11 @@ func TestClient_RetryLogic(t *testing.T) {
 		if att < 2 {
 			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"message":"rate limit exceeded"}`))
+			_, _ = w.Write([]byte(`{"message":"rate limit exceeded"}`))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":[],"next":null}`))
+		_, _ = w.Write([]byte(`{"data":[],"next":null}`))
 	}))
 	defer ts.Close()
 

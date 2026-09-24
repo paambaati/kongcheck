@@ -1,35 +1,62 @@
+# golangci-lint v2 configuration.
+# Keep the version in sync with:
+#   - Makefile  (GOLANGCI_LINT_VERSION — `make lint` always runs this exact version)
+#   - .github/workflows/ci.yml (GOLANGCI_LINT_VERSION for golangci-lint-action)
+version: "2"
+
 run:
   timeout: 5m
   tests: true
 
 linters:
+  default: standard
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
     - misspell
     - unconvert
     - revive
     - gosec
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - shadow
+        - fieldalignment
+    errcheck:
+      # CLI stdout/stderr writes are intentionally best-effort; ignore only the
+      # fmt print helpers. All other error returns stay checked.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    # ST1005 (error strings should not be capitalized) is disabled so CLI/MCP
+    # error messages stay byte-compatible with the TypeScript implementation.
+    # QF1001 (De Morgan quickfix) is disabled to avoid churn in test assertions.
+    staticcheck:
+      checks:
+        - "all"
+        - "-ST1005"
+        - "-QF1001"
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: var-naming
+          disabled: true
+    gosec:
+      excludes:
+        - G104 # unchecked error in defer or close
+        - G304 # file path from variable (CLI --file argument)
+        - G307 # defer Close error
 
-linters-settings:
-  govet:
-    enable-all: true
-    disable:
-      - shadow
-      - fieldalignment
-  stylecheck:
-    checks: ["all", "-ST1005"]
-  gosec:
-    excludes:
-      - G104 # unchecked error in defer or close
-      - G304 # file path from variable (CLI argument)
-      - G307 # defer Close error
+  exclusions:
+    generated: lax
+    rules:
+      # Test helpers write fixtures with loose permissions on purpose.
+      - linters:
+          - gosec
+        path: _test\.go
+        text: "G306"
 
 issues:
-  exclude-use-default: true
   max-issues-per-linter: 0
   max-same-issues: 0

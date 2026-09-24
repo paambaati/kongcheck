@@ -53,7 +53,8 @@ func (a *App) newDumpCommand(g *globalFlags) *cobra.Command {
 				}
 				return nil
 			}
-			if err := os.WriteFile(outputFile, b, 0o644); err != nil {
+			// Owner-only: dumps may contain internal hostnames and route shapes.
+			if err := os.WriteFile(outputFile, b, 0o600); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.Stdout, "Config saved to %s. %s\n", outputFile, format.DumpSummary(data))

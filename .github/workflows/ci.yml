@@ -4,7 +4,8 @@ on:
   workflow_call:
 
 env:
-  GOLANGCI_LINT_VERSION: v2.13
+  # Keep in sync with GOLANGCI_LINT_VERSION in the Makefile (exact semver).
+  GOLANGCI_LINT_VERSION: v2.13.0
 
 jobs:
   lint-and-test:

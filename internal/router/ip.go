@@ -23,6 +23,7 @@ func ParseIPv4(ip string) (uint32, bool) {
 		if !ok {
 			return 0, false
 		}
+		// #nosec G115 -- n is bounded to [0, 255] by parseDecimal.
 		result = result<<8 | uint32(n)
 	}
 	return result, true

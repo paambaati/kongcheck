@@ -330,7 +330,7 @@ func (c *Client) get(ctx context.Context, rawURL, token string) (int, http.Heade
 	if err != nil {
 		return 0, nil, nil, errors.New(RedactBearer(err.Error()))
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		body = []byte("(unreadable body)")
