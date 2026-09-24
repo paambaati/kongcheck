@@ -78,6 +78,12 @@ func detectCollisions(ctx context.Context, sorted []*router.MarshalledRoute, fla
 	findings := []*model.Finding{}
 
 	for i, res := range results {
+		// res is nil when ctx was cancelled before parallelFor reached index i
+		// (simulateAll pre-allocates the slice but only fills indices that were
+		// actually visited); skip unresolved candidates instead of panicking.
+		if res == nil {
+			continue
+		}
 		if len(res.MatchedRoutes) < 2 {
 			continue
 		}
