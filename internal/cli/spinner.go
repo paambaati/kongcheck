@@ -32,15 +32,16 @@ func (s *spinner) Start(text string) {
 	}
 	s.mu.Lock()
 	s.text = text
+	stop, done := make(chan struct{}), make(chan struct{})
+	s.stop, s.done = stop, done
 	s.mu.Unlock()
-	s.stop, s.done = make(chan struct{}), make(chan struct{})
 	go func() {
-		defer close(s.done)
+		defer close(done)
 		t := time.NewTicker(80 * time.Millisecond)
 		defer t.Stop()
 		for i := 0; ; i++ {
 			select {
-			case <-s.stop:
+			case <-stop:
 				return
 			case <-t.C:
 				s.mu.Lock()
@@ -61,11 +62,17 @@ func (s *spinner) Update(text string) {
 }
 
 func (s *spinner) Stop() {
-	if !s.enabled || s.stop == nil {
+	if !s.enabled {
 		return
 	}
-	close(s.stop)
-	<-s.done
-	s.stop = nil
+	s.mu.Lock()
+	stop, done := s.stop, s.done
+	s.stop, s.done = nil, nil
+	s.mu.Unlock()
+	if stop == nil {
+		return
+	}
+	close(stop)
+	<-done
 	fmt.Fprint(s.w, "\r\x1b[K")
 }

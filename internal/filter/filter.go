@@ -41,6 +41,9 @@ var Keys = []Key{KeyPath, KeyName, KeyService, KeyTag, KeyID}
 type Predicate struct {
 	Key   Key
 	Value string
+	// valueFold is strings.ToLower(Value), precomputed once so case-insensitive
+	// name/service matching does not allocate per route.
+	valueFold string
 }
 
 // Parse parses a single `key:value` filter. The value may itself contain
@@ -61,7 +64,7 @@ func Parse(raw string) (Predicate, error) {
 	if value == "" {
 		return Predicate{}, fmt.Errorf(`Filter value for key "%s" must not be empty.`, key)
 	}
-	return Predicate{Key: Key(key), Value: value}, nil
+	return Predicate{Key: Key(key), Value: value, valueFold: strings.ToLower(value)}, nil
 }
 
 // ParseAll parses every raw filter; nil or empty input yields no predicates.
@@ -80,6 +83,11 @@ func ParseAll(raw []string) ([]Predicate, error) {
 // RouteMatches tests a route (and its resolved service, which may be nil)
 // against a single predicate.
 func RouteMatches(route *model.KongRoute, service *model.KongService, p Predicate) bool {
+	// Ensure valueFold is set even for predicates built inline in tests.
+	fold := p.valueFold
+	if fold == "" {
+		fold = strings.ToLower(p.Value)
+	}
 	switch p.Key {
 	case KeyPath:
 		// Stripping `~` lets path:/api match both /api/v2 and ~/api/v2.*.
@@ -87,12 +95,12 @@ func RouteMatches(route *model.KongRoute, service *model.KongService, p Predicat
 			return strings.HasPrefix(strings.TrimPrefix(path, "~"), p.Value)
 		})
 	case KeyName:
-		return containsFold(route.Name, p.Value)
+		return containsFoldLower(route.Name, fold)
 	case KeyService:
 		if (route.Service != nil && route.Service.ID == p.Value) || (service != nil && service.ID == p.Value) {
 			return true
 		}
-		return service != nil && service.Name != "" && containsFold(service.Name, p.Value)
+		return service != nil && service.Name != "" && containsFoldLower(service.Name, fold)
 	case KeyTag:
 		return slices.Contains(route.Tags, p.Value)
 	case KeyID:
@@ -106,16 +114,16 @@ func RouteMatches(route *model.KongRoute, service *model.KongService, p Predicat
 func RouteMatchesAll(route *model.KongRoute, service *model.KongService, preds []Predicate) bool {
 	// Group values by key, keeping first-seen key order.
 	var order []Key
-	groups := make(map[Key][]string)
+	groups := make(map[Key][]Predicate)
 	for _, p := range preds {
 		if _, ok := groups[p.Key]; !ok {
 			order = append(order, p.Key)
 		}
-		groups[p.Key] = append(groups[p.Key], p.Value)
+		groups[p.Key] = append(groups[p.Key], p)
 	}
 	for _, k := range order {
-		if !slices.ContainsFunc(groups[k], func(v string) bool {
-			return RouteMatches(route, service, Predicate{Key: k, Value: v})
+		if !slices.ContainsFunc(groups[k], func(p Predicate) bool {
+			return RouteMatches(route, service, p)
 		}) {
 			return false
 		}
@@ -140,6 +148,7 @@ func Apply(findings []*model.Finding, preds []Predicate, services *model.Service
 	return out
 }
 
-func containsFold(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+// containsFoldLower reports whether s contains substr (already lowercased).
+func containsFoldLower(s, substrLower string) bool {
+	return strings.Contains(strings.ToLower(s), substrLower)
 }
