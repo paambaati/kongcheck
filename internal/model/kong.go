@@ -77,8 +77,12 @@ type KongRoute struct {
 	// router flavor.
 	Expression *string `json:"expression,omitempty"`
 
-	raw             []byte
-	extra           map[string]json.RawMessage
+	raw []byte
+	// extra holds every field of the original payload this tool does not
+	// model, in their original API response order (so re-encoding stays
+	// byte-order-faithful instead of the alphabetical order a
+	// map[string]json.RawMessage would force on re-marshal). See Fields.
+	extra           []RawField
 	pathsOverridden bool
 }
 

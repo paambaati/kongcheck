@@ -15,9 +15,12 @@ type LinkedRoute struct {
 	URL   string
 }
 
-// MarshalJSON implements json.Marshaler.
+// MarshalJSON implements json.Marshaler. The `_konnectUrl` key is appended
+// after the route's original fields, preserving their order (see
+// model.RawField) instead of the alphabetical order a
+// map[string]json.RawMessage would force on re-marshal.
 func (l LinkedRoute) MarshalJSON() ([]byte, error) {
-	m, err := l.Route.ToMap()
+	fields, err := l.Route.Fields()
 	if err != nil {
 		return nil, err
 	}
@@ -25,8 +28,8 @@ func (l LinkedRoute) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	m["_konnectUrl"] = u
-	return json.Marshal(m)
+	fields = append(fields, model.RawField{Key: "_konnectUrl", Value: u})
+	return model.MarshalFields(fields)
 }
 
 // jsonFinding mirrors model.Finding with routes that may carry deep-links.

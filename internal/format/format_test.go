@@ -147,3 +147,48 @@ func TestFormatters(t *testing.T) {
 		}
 	})
 }
+
+// TestJSON_PreservesRouteFieldOrder guards against JSON output (live mode,
+// where every route gains a `_konnectUrl` deep-link) reordering a route's
+// fields alphabetically. LinkedRoute used to build a map[string]json.RawMessage
+// and re-marshal it, and encoding/json always sorts map keys — silently
+// reordering every field relative to what Konnect actually returned.
+func TestJSON_PreservesRouteFieldOrder(t *testing.T) {
+	// Deliberately neither alphabetical nor in KongRoute's Go struct
+	// declaration order, so this can only pass if the route's original byte
+	// order survived all the way through LinkedRoute's _konnectUrl injection.
+	raw := []byte(`{"name":"my-route","protocols":["http"],"id":"r-json-order","paths":["/foo"]}`)
+	var route model.KongRoute
+	if err := json.Unmarshal(raw, &route); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	findings := []*model.Finding{{
+		Severity:     model.SeverityInfo,
+		Type:         model.FindingUniversalMatcher,
+		RouterFlavor: model.FlavorTraditional,
+		Routes:       []*model.KongRoute{&route},
+		Reason:       []string{"catch-all"},
+	}}
+	ctx := &format.KonnectContext{ControlPlaneID: "cp-1", Region: "us"}
+
+	out, err := format.JSON(findings, model.FlavorTraditional, ctx)
+	if err != nil {
+		t.Fatalf("JSON format failed: %v", err)
+	}
+
+	pos := func(key string) int {
+		i := strings.Index(out, `"`+key+`"`)
+		if i < 0 {
+			t.Fatalf("expected key %q in output:\n%s", key, out)
+		}
+		return i
+	}
+	name, protocols, id, paths, konnectURL := pos("name"), pos("protocols"), pos("id"), pos("paths"), pos("_konnectUrl")
+	if !(name < protocols && protocols < id && id < paths && paths < konnectURL) {
+		t.Errorf("expected field order name, protocols, id, paths, _konnectUrl "+
+			"(original API order preserved, _konnectUrl appended last); got positions "+
+			"name=%d protocols=%d id=%d paths=%d _konnectUrl=%d in:\n%s",
+			name, protocols, id, paths, konnectURL, out)
+	}
+}
