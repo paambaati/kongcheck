@@ -429,6 +429,7 @@ func TestMCPServer_Tools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client.Connect: %v", err)
 	}
+	//nolint:errcheck
 	defer session.Close()
 
 	t.Run("list tools", func(t *testing.T) {
