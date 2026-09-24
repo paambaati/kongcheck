@@ -63,8 +63,7 @@ func TestGet_TransportFailurePreservesDeadlineExceededForErrorsIs(t *testing.T) 
 		t.Fatalf("expected errors.Is(err, context.DeadlineExceeded) to succeed "+
 			"(the original *url.Error must survive redaction), got: %v", err)
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if netErr, ok := errors.AsType[net.Error](err); ok {
 		// Not all platforms surface this as a net.Error wrapping the
 		// deadline, but when they do it must still be reachable through the
 		// redacted wrapper.

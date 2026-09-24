@@ -72,8 +72,7 @@ func (a *App) Run(ctx context.Context, args []string) int {
 	if err == nil {
 		return 0
 	}
-	var ee *exitError
-	if errors.As(err, &ee) {
+	if ee, ok := errors.AsType[*exitError](err); ok {
 		if ee.msg != "" {
 			fmt.Fprintln(a.Stderr, "Error: "+ee.msg)
 		}
