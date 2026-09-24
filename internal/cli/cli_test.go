@@ -133,3 +133,51 @@ func TestCLI_ValidationErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestCLI_FailOnInfoWithoutShowInfo(t *testing.T) {
+	// Universal catch-all produces an INFO finding. --fail-on INFO must still
+	// exit 1 even when the finding is hidden from the rendered report.
+	created := int64(1700000000)
+	data := &model.KonnectData{
+		Routes: []*model.KongRoute{{
+			ID:        "00000000-0000-0000-0000-000000000009",
+			Name:      "catch-all",
+			Paths:     []string{"/"},
+			CreatedAt: &created,
+		}},
+		Services:       model.NewServiceIndex(),
+		RouterFlavor:   model.FlavorTraditional,
+		ControlPlaneID: "11111111-1111-1111-1111-111111111111",
+		Region:         "us",
+	}
+	app, stdout, stderr := stubApp(data)
+	code := app.Run(context.Background(), []string{"analyze", "--file", "mock.json", "--fail-on", "INFO"})
+	if code != 1 {
+		t.Fatalf("expected exit 1 for --fail-on INFO without --show-info, got %d. stdout: %s stderr: %s",
+			code, stdout.String(), stderr.String())
+	}
+}
+
+func TestCLI_ParsePortFlag(t *testing.T) {
+	app, _, stderr := stubApp(sampleData())
+	for _, bad := range []string{"0", "65536", "80.5", "abc", "NaN", "Inf"} {
+		code := app.Run(context.Background(), []string{
+			"explain-request", "--file", "mock.json", "--path", "/api",
+			"--source-ip", "10.0.0.1", "--source-port", bad,
+		})
+		if code != 1 {
+			t.Errorf("port %q: expected exit 1, got %d (stderr: %s)", bad, code, stderr.String())
+		}
+	}
+	app2, stdout, stderr2 := stubApp(sampleData())
+	code := app2.Run(context.Background(), []string{
+		"explain-request", "--file", "mock.json", "--path", "/api/v1/userstest",
+		"--source-ip", "10.0.0.1", "--source-port", "8080",
+	})
+	if code != 0 {
+		t.Fatalf("valid port should succeed, got %d: %s", code, stderr2.String())
+	}
+	if !strings.Contains(stdout.String(), "Winning route") {
+		t.Errorf("expected winner output:\n%s", stdout.String())
+	}
+}

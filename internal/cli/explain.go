@@ -229,12 +229,11 @@ func parsePortFlag(name, raw string, set bool) (*int, error) {
 	if !set {
 		return nil, nil
 	}
-	n, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
-	if err != nil || n != float64(int(n)) || n < 1 || n > 65535 {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 1 || n > 65535 {
 		return nil, fail("%s must be an integer between 1 and 65535, got '%s'", name, raw)
 	}
-	p := int(n)
-	return &p, nil
+	return &n, nil
 }
 
 func portSuffix(p *int) string {

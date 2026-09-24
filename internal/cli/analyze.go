@@ -67,6 +67,10 @@ func (a *App) runAudit(cmd *cobra.Command, g *globalFlags, collisionsOnly bool) 
 	}
 	findings = filter.Apply(findings, preds, data.Services)
 
+	// --fail-on must see the full filtered set (including INFO when
+	// --fail-on INFO), not only the findings that will be rendered.
+	allFindings := findings
+
 	visible := findings
 	if !g.showInfo {
 		visible = make([]*model.Finding, 0, len(findings))
@@ -78,10 +82,17 @@ func (a *App) runAudit(cmd *cobra.Command, g *globalFlags, collisionsOnly bool) 
 	}
 	spin.Stop()
 
-	return a.printFindings(visible, flavor, g, format.ContextFor(data), len(findings)-len(visible))
+	if err := a.printFindings(visible, flavor, g, format.ContextFor(data), len(findings)-len(visible)); err != nil {
+		return err
+	}
+	if g.failOn != "" && format.ShouldFail(allFindings, model.Severity(strings.ToUpper(g.failOn))) {
+		return &exitError{code: 1}
+	}
+	return nil
 }
 
-// printFindings writes findings in the requested format and applies --fail-on.
+// printFindings writes findings in the requested format. Exit-code policy for
+// --fail-on is applied by the caller so hidden INFO findings still count.
 func (a *App) printFindings(findings []*model.Finding, flavor model.RouterFlavor, g *globalFlags, ctx *format.KonnectContext, hiddenInfo int) error {
 	var out string
 	switch g.format {
@@ -100,9 +111,5 @@ func (a *App) printFindings(findings []*model.Finding, flavor model.RouterFlavor
 		})
 	}
 	fmt.Fprintln(a.Stdout, out)
-
-	if g.failOn != "" && format.ShouldFail(findings, model.Severity(strings.ToUpper(g.failOn))) {
-		return &exitError{code: 1}
-	}
 	return nil
 }
