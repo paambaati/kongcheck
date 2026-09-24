@@ -14,7 +14,6 @@ package analyzer
 
 import (
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/paambaati/kongcheck/internal/model"
@@ -205,5 +204,3 @@ func lintUniversalMatchers(routes []*router.MarshalledRoute, flavor model.Router
 	}
 	return findings
 }
-
-func itoa(n int) string { return strconv.Itoa(n) }

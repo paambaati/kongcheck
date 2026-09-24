@@ -3,6 +3,7 @@ package analyzer
 import (
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -272,7 +273,7 @@ func buildCollisionReason(winner, loser *router.MarshalledRoute, sample string, 
 			created = router.ISOTime(*r.CreatedAt)
 		}
 		lines = append(lines, `Route "`+r.DisplayName()+`" (`+item.label+`): paths=[`+paths+`], `+
-			"regex_priority="+itoa(r.RegexPriority)+", created_at="+created)
+			"regex_priority="+strconv.Itoa(r.RegexPriority)+", created_at="+created)
 	}
 
 	lines = append(lines, `Both routes match sample request path "`+sample+`".`)

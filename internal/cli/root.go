@@ -13,6 +13,7 @@ import (
 
 	"github.com/paambaati/kongcheck/internal/client"
 	"github.com/paambaati/kongcheck/internal/model"
+	"github.com/paambaati/kongcheck/internal/strutil"
 	"github.com/paambaati/kongcheck/internal/version"
 )
 
@@ -141,15 +142,15 @@ func (a *App) newRootCommand() *cobra.Command {
 
 // konnectConfig resolves connection settings from flags and the environment.
 func (a *App) konnectConfig(g *globalFlags) (model.KonnectConfig, error) {
-	token := firstNonEmpty(g.token, a.Getenv("KONNECT_TOKEN"))
+	token := strutil.FirstNonEmpty(g.token, a.Getenv("KONNECT_TOKEN"))
 	if token == "" {
 		return model.KonnectConfig{}, fail("--token or KONNECT_TOKEN environment variable is required.")
 	}
-	cpID := firstNonEmpty(g.controlPlaneID, a.Getenv("KONNECT_CONTROL_PLANE_ID"))
+	cpID := strutil.FirstNonEmpty(g.controlPlaneID, a.Getenv("KONNECT_CONTROL_PLANE_ID"))
 	if cpID == "" {
 		return model.KonnectConfig{}, fail("--control-plane-id or KONNECT_CONTROL_PLANE_ID environment variable is required.")
 	}
-	return model.KonnectConfig{Token: token, ControlPlaneID: cpID, Region: firstNonEmpty(g.region, "us")}, nil
+	return model.KonnectConfig{Token: token, ControlPlaneID: cpID, Region: strutil.FirstNonEmpty(g.region, "us")}, nil
 }
 
 // loadData reads the config from --file, or fetches it from Konnect.
@@ -177,15 +178,6 @@ func (g *globalFlags) flavorFor(data *model.KonnectData) model.RouterFlavor {
 		return data.RouterFlavor
 	}
 	return model.FlavorTraditional
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // isTerminal reports whether f is a character device (a terminal).

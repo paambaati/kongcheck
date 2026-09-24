@@ -1,5 +1,12 @@
 package router
 
+// This file holds informational Kong path helpers (sanitize/strip/upstream)
+// that do not affect route-winner selection. They are fully unit-tested for
+// fidelity with Kong's traditional router and are reserved for future
+// explain enhancements that may surface the upstream URI.
+//
+// They are intentionally not wired into the match/sort hot path.
+
 import "strings"
 
 // SanitizeURIPostfix sanitises the part of the request path after the matched
