@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"unicode/utf8"
 
 	"github.com/paambaati/kongcheck/internal/model"
@@ -17,14 +18,17 @@ type overlapHit struct {
 // The scan is O(n²) but embarrassingly parallel: each row is processed
 // independently and hits are returned in (i, j) order, matching a sequential
 // nested loop exactly.
-func findOverlapHits(routes []*router.MarshalledRoute) []overlapHit {
+func findOverlapHits(ctx context.Context, routes []*router.MarshalledRoute) []overlapHit {
 	rows := make([][]overlapHit, len(routes))
-	parallelFor(len(routes), func(i int) {
+	parallelFor(ctx, len(routes), func(i int) {
 		a := routes[i]
 		if a.IsUniversal {
 			return
 		}
 		for j := i + 1; j < len(routes); j++ {
+			if ctx.Err() != nil {
+				return
+			}
 			b := routes[j]
 			if b.IsUniversal || a.Route.ID == b.Route.ID {
 				continue
@@ -44,7 +48,7 @@ func findOverlapHits(routes []*router.MarshalledRoute) []overlapHit {
 // detectSiblingOverlaps flags route pairs whose path prefixes share a common
 // stem (e.g. /payments and /payments-v2: the /payments prefix also matches
 // /payments-v2/...) that the collision pass did not already report.
-func detectSiblingOverlaps(routes []*router.MarshalledRoute, flavor model.RouterFlavor, existing []*model.Finding, includeInfo bool) []*model.Finding {
+func detectSiblingOverlaps(ctx context.Context, routes []*router.MarshalledRoute, flavor model.RouterFlavor, existing []*model.Finding, includeInfo bool) []*model.Finding {
 	covered := make(map[pairKey]bool, len(existing))
 	for _, f := range existing {
 		if len(f.Routes) >= 2 {
@@ -53,7 +57,7 @@ func detectSiblingOverlaps(routes []*router.MarshalledRoute, flavor model.Router
 	}
 
 	findings := []*model.Finding{}
-	for _, hit := range findOverlapHits(routes) {
+	for _, hit := range findOverlapHits(ctx, routes) {
 		a, b := routes[hit.i], routes[hit.j]
 		key := makePairKey(a.Route.ID, b.Route.ID)
 		if covered[key] {

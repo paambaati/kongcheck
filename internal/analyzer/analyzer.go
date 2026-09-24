@@ -13,6 +13,7 @@
 package analyzer
 
 import (
+	"context"
 	"slices"
 	"strings"
 
@@ -54,7 +55,13 @@ func isUniversalMatcher(mr *router.MarshalledRoute) bool {
 
 // Analyze runs every analysis pass and returns the findings sorted by
 // severity (HIGH first; the order within a severity is stable).
-func Analyze(data *model.KonnectData, opts Options) []*model.Finding {
+func Analyze(ctx context.Context, data *model.KonnectData, opts Options) []*model.Finding {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
 	flavor := opts.Flavor
 	if flavor == "" {
 		flavor = data.RouterFlavor
@@ -68,12 +75,24 @@ func Analyze(data *model.KonnectData, opts Options) []*model.Finding {
 
 	// Stamp universality once instead of once per pair in the O(n²) passes.
 	for _, mr := range sorted {
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
 		mr.IsUniversal = isUniversalMatcher(mr)
 	}
 
 	findings := lintSuspiciousRegex(sorted, flavor)
-	findings = append(findings, detectCollisions(sorted, flavor, includeInfo)...)
-	findings = append(findings, detectSiblingOverlaps(sorted, flavor, findings, includeInfo)...)
+	if err := ctx.Err(); err != nil {
+		return findings
+	}
+	findings = append(findings, detectCollisions(ctx, sorted, flavor, includeInfo)...)
+	if err := ctx.Err(); err != nil {
+		return findings
+	}
+	findings = append(findings, detectSiblingOverlaps(ctx, sorted, flavor, findings, includeInfo)...)
+	if err := ctx.Err(); err != nil {
+		return findings
+	}
 
 	// Routes already flagged as suspicious (accidental catch-alls such as
 	// `~/?$`) are not reported a second time as universal matchers.

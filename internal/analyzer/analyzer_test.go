@@ -9,6 +9,7 @@
 package analyzer_test
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -75,11 +76,11 @@ func svc(id, name string) *model.KongService { return &model.KongService{ID: id,
 // analyzeRoutes mirrors the TS analyzeRoutes(config, options) defaults
 // (includeInfo defaults to true).
 func analyzeRoutes(config *model.KonnectData) []*model.Finding {
-	return analyzer.Analyze(config, analyzer.Options{})
+	return analyzer.Analyze(context.Background(), config, analyzer.Options{})
 }
 
 func analyzeRoutesWith(config *model.KonnectData, flavor model.RouterFlavor, includeInfo bool) []*model.Finding {
-	return analyzer.Analyze(config, analyzer.Options{Flavor: flavor, ExcludeInfo: !includeInfo})
+	return analyzer.Analyze(context.Background(), config, analyzer.Options{Flavor: flavor, ExcludeInfo: !includeInfo})
 }
 
 func marshalRoute(r *model.KongRoute) *router.MarshalledRoute {
@@ -444,7 +445,7 @@ func TestAnalyzer(t *testing.T) {
 		}, model.FlavorTraditionalCompatible)
 
 		t.Run("still produces suspicious_regex findings under traditional_compatible flavor", func(t *testing.T) {
-			findings := analyzer.Analyze(config, analyzer.Options{Flavor: model.FlavorTraditionalCompatible})
+			findings := analyzer.Analyze(context.Background(), config, analyzer.Options{Flavor: model.FlavorTraditionalCompatible})
 			suspicious := filter(findings, isType(model.FindingSuspiciousRegex))
 			expectGT(t, len(suspicious), 0, "Suspicious regex linting should fire regardless of router flavor")
 		})
@@ -1438,5 +1439,19 @@ func TestAnalyzer(t *testing.T) {
 			expectEq(t, infoOnly, false,
 				"At least one finding must be HIGH or MEDIUM since the unconstrained route can intercept all SNIs")
 		})
+	})
+
+	t.Run("analyzeRoutes – respects context cancellation", func(t *testing.T) {
+		config := makeConfig([]*model.KongRoute{
+			route("r1", "p1", []string{"/payments"}),
+			route("r2", "p2", []string{"/payments/status"}),
+		}, model.FlavorTraditional)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // immediately cancel
+		findings := analyzer.Analyze(ctx, config, analyzer.Options{})
+		if len(findings) != 0 {
+			t.Errorf("expected 0 findings on pre-cancelled context, got %d", len(findings))
+		}
 	})
 }

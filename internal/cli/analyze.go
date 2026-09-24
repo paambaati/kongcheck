@@ -55,7 +55,7 @@ func (a *App) runAudit(cmd *cobra.Command, g *globalFlags, collisionsOnly bool) 
 	spin.Update("Analysing routes...")
 
 	flavor := g.flavorFor(data)
-	findings := analyzer.Analyze(data, analyzer.Options{Flavor: flavor})
+	findings := analyzer.Analyze(cmd.Context(), data, analyzer.Options{Flavor: flavor})
 	if collisionsOnly {
 		kept := findings[:0:0]
 		for _, f := range findings {

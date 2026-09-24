@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"context"
 	"runtime"
 	"slices"
 	"strconv"
@@ -24,19 +25,25 @@ func makePairKey(x, y string) pairKey {
 // simulateAll runs every candidate request against the sorted routes. The
 // simulations are independent, so they are spread across CPUs; results are
 // returned in candidate order so downstream processing stays deterministic.
-func simulateAll(sorted []*router.MarshalledRoute, candidates []router.SimRequest) []*router.SimResult {
+func simulateAll(ctx context.Context, sorted []*router.MarshalledRoute, candidates []router.SimRequest) []*router.SimResult {
 	results := make([]*router.SimResult, len(candidates))
-	parallelFor(len(candidates), func(i int) {
+	parallelFor(ctx, len(candidates), func(i int) {
 		results[i] = router.SimulateRequest(sorted, candidates[i])
 	})
 	return results
 }
 
 // parallelFor calls fn(i) for i in [0, n) using up to GOMAXPROCS workers.
-func parallelFor(n int, fn func(i int)) {
+func parallelFor(ctx context.Context, n int, fn func(i int)) {
+	if ctx.Err() != nil {
+		return
+	}
 	workers := min(runtime.GOMAXPROCS(0), n)
 	if workers <= 1 {
 		for i := range n {
+			if ctx.Err() != nil {
+				return
+			}
 			fn(i)
 		}
 		return
@@ -49,6 +56,9 @@ func parallelFor(n int, fn func(i int)) {
 		go func() {
 			defer wg.Done()
 			for i := start; i < end; i++ {
+				if ctx.Err() != nil {
+					return
+				}
 				fn(i)
 			}
 		}()
@@ -59,9 +69,9 @@ func parallelFor(n int, fn func(i int)) {
 // detectCollisions simulates candidate requests and emits a finding for each
 // route pair matched by the same request (one finding per pair; later
 // requests only add samples).
-func detectCollisions(sorted []*router.MarshalledRoute, flavor model.RouterFlavor, includeInfo bool) []*model.Finding {
+func detectCollisions(ctx context.Context, sorted []*router.MarshalledRoute, flavor model.RouterFlavor, includeInfo bool) []*model.Finding {
 	candidates := GenerateCandidateRequests(sorted)
-	results := simulateAll(sorted, candidates)
+	results := simulateAll(ctx, sorted, candidates)
 
 	seen := make(map[pairKey]bool)
 	byPair := make(map[pairKey]*model.Finding)

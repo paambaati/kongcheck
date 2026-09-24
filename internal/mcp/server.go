@@ -388,7 +388,7 @@ func (s *Server) handleAnalyze(ctx context.Context, argsRaw json.RawMessage) (st
 	if err != nil {
 		return "", err
 	}
-	all := analyzer.Analyze(data, analyzer.Options{Flavor: flavor, ExcludeInfo: !args.IncludeInfo})
+	all := analyzer.Analyze(ctx, data, analyzer.Options{Flavor: flavor, ExcludeInfo: !args.IncludeInfo})
 	findings := filter.Apply(all, preds, data.Services)
 	return toJSON(struct {
 		ControlPlaneID string                `json:"controlPlaneId"`
@@ -415,7 +415,7 @@ func (s *Server) handleCollisions(ctx context.Context, argsRaw json.RawMessage) 
 		return "", err
 	}
 	var collisions []*model.Finding
-	for _, f := range analyzer.Analyze(data, analyzer.Options{Flavor: flavor, ExcludeInfo: true}) {
+	for _, f := range analyzer.Analyze(ctx, data, analyzer.Options{Flavor: flavor, ExcludeInfo: true}) {
 		if f.Type == model.FindingShadowing || f.Type == model.FindingCollision {
 			collisions = append(collisions, f)
 		}
