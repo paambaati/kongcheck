@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"sync/atomic"
 )
 
 // Lossless JSON handling for Kong entities.
@@ -31,6 +32,14 @@ import (
 type RawField struct {
 	Key   string
 	Value json.RawMessage
+}
+
+// routeExtra is KongRoute's lazily-parsed field cache (see extra). fields
+// and err are set together, exactly once in practice — see Fields — so no
+// synchronization is needed to read them back out once observed non-nil.
+type routeExtra struct {
+	fields []RawField
+	err    error
 }
 
 // MarshalFields encodes fields as a JSON object, preserving their order.
@@ -120,6 +129,11 @@ func (r *KongRoute) UnmarshalJSON(b []byte) error {
 	}
 	*r = KongRoute(p)
 	r.raw = bytes.Clone(b)
+	// Allocated here, synchronously, before r is ever shared with another
+	// goroutine — never reassigned afterward, so concurrent calls to Fields
+	// only ever need to synchronize on the atomic.Pointer's pointee (see
+	// Fields), not on r.extra itself.
+	r.extra = new(atomic.Pointer[routeExtra])
 	return nil
 }
 
@@ -142,19 +156,41 @@ func (r *KongRoute) MarshalJSON() ([]byte, error) {
 // Fields returns the route's fields (modelled fields overlaid on the
 // original payload) in their original API response order. Callers may
 // append additional fields, e.g. `_konnectUrl`.
+//
+// Safe for concurrent use on the same *KongRoute (e.g. a route pointer
+// shared by mcp.Cache across tool calls): the raw-payload parse is cached in
+// extra via a compare-and-swap rather than a plain check-then-set, so
+// concurrent callers cannot observe a partially-written cache or race on the
+// write. parseOrderedFields is a pure function of r.raw, so if two callers
+// race to populate an empty cache, computing it twice and discarding the
+// loser is wasted work but never incorrect — both results are equal.
 func (r *KongRoute) Fields() ([]RawField, error) {
-	if r.extra == nil && len(r.raw) > 0 {
-		fields, err := parseOrderedFields(r.raw)
-		if err != nil {
-			return nil, err
+	if r.extra != nil {
+		cached := r.extra.Load()
+		if cached == nil && len(r.raw) > 0 {
+			fields, err := parseOrderedFields(r.raw)
+			computed := &routeExtra{fields: fields, err: err}
+			if r.extra.CompareAndSwap(nil, computed) {
+				cached = computed
+			} else {
+				cached = r.extra.Load() // another goroutine won the race
+			}
 		}
-		r.extra = fields
+		if cached != nil {
+			if cached.err != nil {
+				return nil, cached.err
+			}
+			return r.overlayPaths(cached.fields)
+		}
 	}
-	if r.extra == nil {
-		type plain KongRoute
-		return orderedFieldsOf(plain(*r))
-	}
-	out := slices.Clone(r.extra)
+	type plain KongRoute
+	return orderedFieldsOf(plain(*r))
+}
+
+// overlayPaths returns a clone of fields with "paths" replaced by r.Paths
+// when WithPaths has overridden it, preserving the key's original position.
+func (r *KongRoute) overlayPaths(fields []RawField) ([]RawField, error) {
+	out := slices.Clone(fields)
 	if r.pathsOverridden {
 		b, err := json.Marshal(r.Paths)
 		if err != nil {

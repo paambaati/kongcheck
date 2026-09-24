@@ -10,6 +10,7 @@ package model_test
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/paambaati/kongcheck/internal/model"
@@ -130,4 +131,51 @@ func mustMarshalFields(t *testing.T, fields []model.RawField) []byte {
 		t.Fatalf("MarshalFields: %v", err)
 	}
 	return b
+}
+
+// TestKongRoute_Fields_ConcurrentCallsAreRaceFree exercises Fields' lazy
+// cache from many goroutines on the same *KongRoute pointer — the exact
+// scenario mcp.Cache creates by handing out one cached route pointer to
+// every concurrent tool call for the same control plane. Run with -race:
+// before this fix, r.extra's plain check-then-set was an unsynchronized
+// concurrent read/write on shared memory whenever two goroutines called
+// Fields on the same route for the first time.
+func TestKongRoute_Fields_ConcurrentCallsAreRaceFree(t *testing.T) {
+	raw := []byte(`{"id":"r1","name":"concurrent-route","paths":["/api"],"protocols":["http"]}`)
+	var r model.KongRoute
+	if err := json.Unmarshal(raw, &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	const goroutines = 64
+	var wg sync.WaitGroup
+	results := make([][]model.RawField, goroutines)
+	errs := make([]error, goroutines)
+	wg.Add(goroutines)
+	for i := range goroutines {
+		go func(i int) {
+			defer wg.Done()
+			results[i], errs[i] = r.Fields()
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: Fields() error: %v", i, err)
+		}
+	}
+	want, err := model.MarshalFields(results[0])
+	if err != nil {
+		t.Fatalf("MarshalFields: %v", err)
+	}
+	for i, fields := range results {
+		got, err := model.MarshalFields(fields)
+		if err != nil {
+			t.Fatalf("goroutine %d: MarshalFields: %v", i, err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("goroutine %d produced a different result: %s != %s", i, got, want)
+		}
+	}
 }

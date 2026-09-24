@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // KongService is a Kong service entity. Only the fields relevant to routing
@@ -82,7 +83,17 @@ type KongRoute struct {
 	// model, in their original API response order (so re-encoding stays
 	// byte-order-faithful instead of the alphabetical order a
 	// map[string]json.RawMessage would force on re-marshal). See Fields.
-	extra           []RawField
+	//
+	// It is a pointer to an atomic.Pointer (not an embedded value) so that
+	// WithPaths's shallow struct copy can share one lazily-computed cache
+	// between a route and its derived per-path copies — cheap and correct,
+	// since they share the same underlying raw payload — without copying a
+	// lock/atomic value by value (which go vet's copylocks check forbids)
+	// and without a data race if Fields is called concurrently on a route
+	// pointer shared across goroutines (e.g. one cached by the MCP server).
+	// Always non-nil once raw is set (see UnmarshalJSON); the pointee starts
+	// nil and is populated at most-once-in-practice by Fields.
+	extra           *atomic.Pointer[routeExtra]
 	pathsOverridden bool
 }
 
