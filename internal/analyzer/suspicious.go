@@ -120,9 +120,3 @@ func SuggestRegexFix(raw string) string {
 	_, fix, _ := EvaluateSuspiciousRegex(raw)
 	return fix
 }
-
-// suspiciousSeverity returns HIGH when any matching pattern is HIGH, else MEDIUM.
-func suspiciousSeverity(raw string) model.Severity {
-	_, _, sev := EvaluateSuspiciousRegex(raw)
-	return sev
-}
