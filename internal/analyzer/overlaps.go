@@ -157,10 +157,11 @@ func overlapSample(src, dst *router.MarshalledRoute) (string, bool) {
 }
 
 func isCleanBoundary(sample string, matchEnd int) bool {
-	if matchEnd >= len(sample) {
-		return true
-	}
-	// Fast path for ASCII URLs (no allocations).
+	// Fast path for ASCII URLs (no allocations). Byte length equals rune
+	// count only in this branch, so the len(sample) comparison is only valid
+	// here — it must not be hoisted above the ASCII check (see non-ASCII
+	// branch below, where matchEnd is a rune count but len(sample) is a byte
+	// count).
 	isASCII := true
 	for i := 0; i < len(sample); i++ {
 		if sample[i] >= utf8.RuneSelf {
@@ -169,26 +170,34 @@ func isCleanBoundary(sample string, matchEnd int) bool {
 		}
 	}
 	if isASCII {
+		if matchEnd >= len(sample) {
+			return true
+		}
 		if sample[matchEnd] == '/' {
 			return true
 		}
 		return matchEnd > 0 && sample[matchEnd-1] == '/'
 	}
 
-	// For non-ASCII, decode runes without slice allocation.
+	// For non-ASCII, decode runes without slice allocation, comparing
+	// matchEnd against the rune count rather than the byte length.
 	var prevRune, curRune rune
 	runeIdx := 0
+	reachedMatchEnd := false
 	for _, r := range sample {
 		if runeIdx == matchEnd-1 {
 			prevRune = r
 		}
 		if runeIdx == matchEnd {
 			curRune = r
+			reachedMatchEnd = true
 			break
 		}
 		runeIdx++
 	}
-	if runeIdx < matchEnd {
+	if !reachedMatchEnd {
+		// matchEnd is at or past the sample's total rune count: the match
+		// consumed the whole sample, which is always a clean boundary.
 		return true
 	}
 	if curRune == '/' {
