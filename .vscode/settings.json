@@ -1,9 +1,12 @@
 {
-	"editor.defaultFormatter": "oxc.oxc-vscode",
-	"editor.formatOnSave": false,
-	"editor.formatOnSaveMode": "file",
-	"editor.codeActionsOnSave": {
-		"source.format.oxc": "always",
-		"source.fixAll.oxc": "always"
-	}
+	"[go]": {
+		"editor.defaultFormatter": "golang.go",
+		"editor.formatOnSave": true,
+		"editor.codeActionsOnSave": {
+			"source.organizeImports": "always"
+		}
+	},
+	"go.useLanguageServer": true,
+	"go.lintTool": "golangci-lint",
+	"go.lintOnSave": "package"
 }

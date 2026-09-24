@@ -78,20 +78,19 @@ Invoke-WebRequest https://github.com/paambaati/kongcheck/releases/latest/downloa
 
 ### Build from source
 
-Requires [Bun](https://bun.sh) v1.3 or later.
+Requires [Go](https://go.dev) 1.23 or later.
 
 ```bash
 git clone https://github.com/paambaati/kongcheck.git
 cd kongcheck
-bun install
-bun run build
+go build -ldflags="-s -w" -o dist/kongcheck ./cmd/kongcheck
 # produces ./dist/kongcheck
 ```
 
 To run without building first –
 
 ```bash
-bun run start <command> [options]
+go run ./cmd/kongcheck <command> [options]
 ```
 
 ---
@@ -316,7 +315,7 @@ kongcheck mcp --cache-ttl 0
 You can also inspect the MCP server's tool calls locally –
 
 ```bash
-bunx @modelcontextprotocol/inspector -e KONNECT_TOKEN=$KONNECT_TOKEN kongcheck mcp
+npx @modelcontextprotocol/inspector -e KONNECT_TOKEN=$KONNECT_TOKEN kongcheck mcp
 ```
 
 See [MCP server](#mcp-server) for more ways to access the server through the AI/LLM of your choice.
@@ -459,7 +458,7 @@ Combined with `--format json`, findings can be parsed and posted as PR annotatio
 
 When you don't have network access to Konnect, or want to analyse a specific point-in-time snapshot, use `dump-config` to save first, then pass the file to analysis commands.
 
-> **Self-managed Kong?** `kongcheck` does not connect to the Kong Admin API. If you run self-hosted Kong Gateway, you can produce a compatible dump manually by exporting your routes and services via the Admin API and shaping the JSON to match the `dump-config` output format, then passing it with `--file`. The required shape is `{ routerFlavor?, routes: KongRoute[], services: KongService[] }` — see the TypeScript types in `src/types.ts`.
+> **Self-managed Kong?** `kongcheck` does not connect to the Kong Admin API. If you run self-hosted Kong Gateway, you can produce a compatible dump manually by exporting your routes and services via the Admin API and shaping the JSON to match the `dump-config` output format, then passing it with `--file`. The required shape is `{ routerFlavor?, routes: KongRoute[], services: KongService[] }` — see the data models in `internal/model/`.
 
 ```bash
 # Pipe directly into analysis without a temp file

@@ -21,13 +21,12 @@
 	"servers": {
 		"kongcheck": {
 			"type": "stdio",
-			"command": "bun",
-			"args": ["run", "src/cli.ts", "mcp"],
+			"command": "go",
+			"args": ["run", "./cmd/kongcheck", "mcp"],
 			"env": {
 				"KONNECT_TOKEN": "${input:konnectToken}",
 				"KONNECT_CONTROL_PLANE_ID": "${input:konnectControlPlaneId}",
-				"KONNECT_REGION": "${input:konnectRegion}",
-				"NODE_TLS_REJECT_UNAUTHORIZED": "0"
+				"KONNECT_REGION": "${input:konnectRegion}"
 			}
 		}
 	}

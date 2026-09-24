@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: kongcheck
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    main: ./cmd/kongcheck
+    binary: kongcheck
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/paambaati/kongcheck/internal/version.Version={{ .Version }}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+  - id: raw-binaries
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ if eq .Arch \"amd64\" }}x64{{ else }}{{ .Arch }}{{ end }}"
+    formats:
+      - binary
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "Merge branch"
+  groups:
+    - title: "Features"
+      regexp: "^.*feat[(\\w)]*:+.*$"
+      order: 0
+    - title: "Bug Fixes"
+      regexp: "^.*fix[(\\w)]*:+.*$"
+      order: 1
+    - title: "Performance"
+      regexp: "^.*perf[(\\w)]*:+.*$"
+      order: 2
+    - title: "Others"
+      order: 999
+
+homebrew_casks:
+  - name: kongcheck
+    ids:
+      - default
+    repository:
+      owner: paambaati
+      name: kongcheck
+      branch: main
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/paambaati/kongcheck"
+    description: "CLI tool for detecting Kong Konnect route collisions and shadowing"
+    binaries:
+      - kongcheck
