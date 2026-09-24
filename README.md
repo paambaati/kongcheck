@@ -78,7 +78,7 @@ Invoke-WebRequest https://github.com/paambaati/kongcheck/releases/latest/downloa
 
 ### Build from source
 
-Requires [Go](https://go.dev) 1.23 or later.
+Requires [Go](https://go.dev) 1.27.1 or later (see `go.mod`).
 
 ```bash
 git clone https://github.com/paambaati/kongcheck.git
