@@ -25,6 +25,7 @@ type KongService struct {
 	Port     int    `json:"port,omitempty"`
 	Path     string `json:"path,omitempty"`
 
+	raw   []byte
 	extra map[string]json.RawMessage
 }
 
@@ -76,6 +77,7 @@ type KongRoute struct {
 	// router flavor.
 	Expression *string `json:"expression,omitempty"`
 
+	raw             []byte
 	extra           map[string]json.RawMessage
 	pathsOverridden bool
 }
