@@ -8,5 +8,6 @@
 	},
 	"go.useLanguageServer": true,
 	"go.lintTool": "golangci-lint",
-	"go.lintOnSave": "package"
+	"go.lintOnSave": "package",
+	"makefile.configureOnOpen": false
 }
