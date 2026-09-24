@@ -95,6 +95,23 @@ func RedactToken(s, token string) string {
 	return s
 }
 
+// redactedError wraps err so Error() returns a token-redacted message while
+// preserving err itself in the chain via Unwrap, so callers further up the
+// stack can still use errors.Is/errors.As (e.g. to detect
+// context.DeadlineExceeded, context.Canceled, or a *net.OpError timeout)
+// instead of that information being lost behind a plain string error.
+func redactedError(err error, token string) error {
+	return &redactErr{msg: RedactToken(err.Error(), token), err: err}
+}
+
+type redactErr struct {
+	msg string
+	err error
+}
+
+func (e *redactErr) Error() string { return e.msg }
+func (e *redactErr) Unwrap() error { return e.err }
+
 // APIError is returned when the Konnect API responds with a non-2xx status.
 // Its message has Bearer tokens redacted and the body truncated, so large
 // responses (which may contain routing config) do not leak into logs.
@@ -393,14 +410,14 @@ func (c *Client) get(ctx context.Context, rawURL, token string) (int, http.Heade
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return 0, nil, nil, errors.New(RedactToken(err.Error(), token))
+		return 0, nil, nil, redactedError(err, token)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Cap how much we buffer so a hostile or misbehaving endpoint cannot
 	// exhaust memory; read up to maxResponseBytes + 1 to detect truncation.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return 0, nil, nil, errors.New(RedactToken(fmt.Sprintf("reading response from %s: %v", rawURL, err), token))
+		return 0, nil, nil, redactedError(fmt.Errorf("reading response from %s: %w", rawURL, err), token)
 	}
 	if int64(len(body)) > maxResponseBytes {
 		return 0, nil, nil, fmt.Errorf("response body from %s exceeded %d bytes limit", rawURL, maxResponseBytes)
