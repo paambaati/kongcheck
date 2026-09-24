@@ -26,8 +26,6 @@ test:
 test-race:
 	go test -race -count=1 ./...
 
-# Always run the pinned golangci-lint binary (installed on demand into ./bin).
-# Never fall back to a different linter or an unpinned global install.
 lint: $(GOLANGCI_LINT)
 	$(GOLANGCI_LINT) run ./...
 
