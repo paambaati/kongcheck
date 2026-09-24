@@ -1,5 +1,17 @@
 // Package format renders analysis findings as human-readable terminal output,
 // JSON, or CSV. All formats expose the same information.
+//
+// Human rendering sanitizes every Kong-supplied string (route name/paths/ID,
+// finding reason/suggestion text, sample requests) with
+// strutil.SanitizeControlChars before writing it to the terminal: a
+// compromised or malicious control plane — or an attacker with limited
+// route-creation privileges — could embed raw ANSI/terminal escape sequences
+// in a route's name or paths, which would otherwise let it manipulate the
+// terminal (move the cursor, hide/rewrite prior output, or worse on
+// terminals with OSC-based features) when the operator runs `kongcheck
+// analyze`. JSON and CSV output are unaffected: they are not executed as
+// terminal control sequences, and CSV already has its own formula-injection
+// defense (see csvQuoted).
 package format
 
 import (
@@ -8,6 +20,7 @@ import (
 	"time"
 
 	"github.com/paambaati/kongcheck/internal/model"
+	"github.com/paambaati/kongcheck/internal/strutil"
 )
 
 // KonnectContext carries the control plane identity used to build Konnect UI
@@ -106,6 +119,16 @@ func RelativeDate(date, now time.Time) string {
 // palette applies ANSI styles when enabled.
 type palette struct{ enabled bool }
 
+// sanitizeAll strips terminal control characters from every element of ss,
+// used for route path lists (see strutil.SanitizeControlChars).
+func sanitizeAll(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = strutil.SanitizeControlChars(s)
+	}
+	return out
+}
+
 const reset = "\x1b[0m"
 
 func (p palette) wrap(code, s string) string {
@@ -188,15 +211,15 @@ func Human(findings []*model.Finding, flavor model.RouterFlavor, ctx *KonnectCon
 			default:
 				tag = c.dim("shadowed")
 			}
-			paths := strings.Join(r.Paths, ", ")
+			paths := strings.Join(sanitizeAll(r.Paths), ", ")
 			if paths == "" {
 				paths = c.dim("(no paths)")
 			}
-			name := r.Name
+			name := strutil.SanitizeControlChars(r.Name)
 			if name == "" {
 				name = c.dim("(unnamed)")
 			}
-			line := "  " + tag + "  " + c.bold(name) + c.dim("  id: "+r.ID) +
+			line := "  " + tag + "  " + c.bold(name) + c.dim("  id: "+strutil.SanitizeControlChars(r.ID)) +
 				"\n          paths: " + paths +
 				fmt.Sprintf("  regex_priority: %d", r.RegexPriority)
 			if r.CreatedAt != nil && *r.CreatedAt != 0 {
@@ -213,7 +236,7 @@ func Human(findings []*model.Finding, flavor model.RouterFlavor, ctx *KonnectCon
 		if len(f.Samples) > 0 {
 			samples := make([]string, len(f.Samples))
 			for i, s := range f.Samples {
-				samples[i] = c.cyan(s)
+				samples[i] = c.cyan(strutil.SanitizeControlChars(s))
 			}
 			lines = append(lines, "  Sample requests: "+strings.Join(samples, ", "))
 		}
@@ -227,19 +250,20 @@ func Human(findings []*model.Finding, flavor model.RouterFlavor, ctx *KonnectCon
 					break
 				}
 			}
-			lines = append(lines, "  Winning route:   "+c.bold(winnerName)+"  "+c.dim("(id: "+f.WinnerID+")"))
+			winnerName = strutil.SanitizeControlChars(winnerName)
+			lines = append(lines, "  Winning route:   "+c.bold(winnerName)+"  "+c.dim("(id: "+strutil.SanitizeControlChars(f.WinnerID)+")"))
 		}
 
 		if len(f.Reason) > 0 {
 			lines = append(lines, "", "  Why:")
 			for _, r := range f.Reason {
-				lines = append(lines, "    "+c.dim("–")+" "+r)
+				lines = append(lines, "    "+c.dim("–")+" "+strutil.SanitizeControlChars(r))
 			}
 		}
 		if len(f.Suggestions) > 0 {
 			lines = append(lines, "", "  Suggested fixes:")
 			for _, s := range f.Suggestions {
-				lines = append(lines, "    "+c.green("→")+" "+c.bold(s))
+				lines = append(lines, "    "+c.green("→")+" "+c.bold(strutil.SanitizeControlChars(s)))
 			}
 		}
 		lines = append(lines, "")

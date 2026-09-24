@@ -192,3 +192,48 @@ func TestJSON_PreservesRouteFieldOrder(t *testing.T) {
 			name, protocols, id, paths, konnectURL, out)
 	}
 }
+
+// TestHuman_SanitizesTerminalControlCharacters guards against ANSI/terminal
+// escape-sequence injection via untrusted Kong route data. A compromised or
+// malicious control plane (or an attacker with limited route-creation
+// privileges) could embed raw ESC/CSI/OSC bytes in a route's `name` or
+// `paths` — printed verbatim, they could move the cursor, hide/rewrite prior
+// report output, or trigger OSC-based terminal exploits.
+func TestHuman_SanitizesTerminalControlCharacters(t *testing.T) {
+	const (
+		esc          = "\x1b"
+		evilName     = esc + "[8m" + esc + "[31mHIDDEN" + esc + "[0mnormal-name"
+		evilPath     = "/api" + esc + "[2K\rFAKE LINE"
+		evilReason   = "Route \"evil\" wins" + esc + "[0m\rINJECTED"
+		evilFix      = "~/safe" + esc + "]0;pwned\x07"
+		evilWinnerID = "r1" + esc + "[31m"
+	)
+	r1 := &model.KongRoute{
+		ID:    evilWinnerID,
+		Name:  evilName,
+		Paths: []string{evilPath},
+	}
+	findings := []*model.Finding{{
+		Severity:     model.SeverityHigh,
+		Type:         model.FindingCollision,
+		RouterFlavor: model.FlavorTraditional,
+		Routes:       []*model.KongRoute{r1},
+		Samples:      []string{"/api" + esc + "[31mtest"},
+		WinnerID:     evilWinnerID,
+		Reason:       []string{evilReason},
+		Suggestions:  []string{evilFix},
+	}}
+
+	human := format.Human(findings, model.FlavorTraditional, nil, format.HumanOptions{Color: false})
+
+	if strings.Contains(human, esc) {
+		t.Fatalf("expected all ESC (0x1B) bytes stripped from human output, found one in:\n%q", human)
+	}
+	// The surrounding legitimate text must still be present (this is
+	// sanitization, not wholesale rejection of the finding).
+	for _, want := range []string{"HIDDEN", "normal-name", "FAKE LINE", "INJECTED", "safe", "pwned"} {
+		if !strings.Contains(human, want) {
+			t.Errorf("expected sanitized text to retain %q, got:\n%q", want, human)
+		}
+	}
+}

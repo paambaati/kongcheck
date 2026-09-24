@@ -126,6 +126,39 @@ func TestCLI_ExplainRequest_JSONPreservesRouteFieldOrder(t *testing.T) {
 	}
 }
 
+// TestCLI_ExplainRequest_SanitizesTerminalControlCharacters guards against
+// ANSI/terminal escape-sequence injection via an untrusted route `name` in
+// explain-request's plain-text output (printExplainJSON's JSON output isn't
+// rendered to a terminal, so it's out of scope here).
+func TestCLI_ExplainRequest_SanitizesTerminalControlCharacters(t *testing.T) {
+	const esc = "\x1b"
+	created := int64(1700000000)
+	data := &model.KonnectData{
+		Routes: []*model.KongRoute{{
+			ID:        "r1",
+			Name:      esc + "[8m" + esc + "[31mHIDDEN" + esc + "[0mnormal-name",
+			Paths:     []string{"/api"},
+			CreatedAt: &created,
+		}},
+		Services:     model.NewServiceIndex(),
+		RouterFlavor: model.FlavorTraditional,
+	}
+	app, stdout, stderr := stubApp(data)
+	code := app.Run(context.Background(), []string{
+		"explain-request", "--file", "mock.json", "--path", "/api", "--method", "GET",
+	})
+	if code != 0 {
+		t.Fatalf("expected code 0, got %d. stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, esc) {
+		t.Fatalf("expected all ESC (0x1B) bytes stripped from explain-request output, found one in:\n%q", out)
+	}
+	if !strings.Contains(out, "HIDDEN") || !strings.Contains(out, "normal-name") {
+		t.Errorf("expected sanitized route name to remain visible, got:\n%q", out)
+	}
+}
+
 func TestCLI_DumpConfig(t *testing.T) {
 	app, stdout, stderr := stubApp(sampleData())
 	code := app.Run(context.Background(), []string{

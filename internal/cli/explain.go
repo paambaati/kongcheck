@@ -10,6 +10,7 @@ import (
 
 	"github.com/paambaati/kongcheck/internal/format"
 	"github.com/paambaati/kongcheck/internal/router"
+	"github.com/paambaati/kongcheck/internal/strutil"
 	"github.com/paambaati/kongcheck/internal/urlutil"
 )
 
@@ -155,7 +156,7 @@ func (a *App) runExplain(cmd *cobra.Command, g *globalFlags, f *explainFlags) er
 	}
 
 	w := res.Winner.Route
-	line := fmt.Sprintf("\nWinning route: %s  (id: %s)", w.DisplayName(), w.ID)
+	line := fmt.Sprintf("\nWinning route: %s  (id: %s)", strutil.SanitizeControlChars(w.DisplayName()), strutil.SanitizeControlChars(w.ID))
 	if u := format.RouteURL(w.ID, ctx); u != "" {
 		line += "\n               " + u
 	}
@@ -165,12 +166,16 @@ func (a *App) runExplain(cmd *cobra.Command, g *globalFlags, f *explainFlags) er
 	}
 	fmt.Fprintln(out, "\nExplanation:")
 	for _, l := range res.Explanation() {
-		fmt.Fprintln(out, "  "+l)
+		fmt.Fprintln(out, "  "+strutil.SanitizeControlChars(l))
 	}
 	if others := res.MatchedRoutes[1:]; len(others) > 0 {
 		fmt.Fprintf(out, "\n%d other route(s) also matched:\n", len(others))
 		for _, mr := range others {
-			line := fmt.Sprintf("  - %s  paths: %s", mr.Route.DisplayName(), strings.Join(mr.Route.Paths, ", "))
+			paths := make([]string, len(mr.Route.Paths))
+			for i, p := range mr.Route.Paths {
+				paths[i] = strutil.SanitizeControlChars(p)
+			}
+			line := fmt.Sprintf("  - %s  paths: %s", strutil.SanitizeControlChars(mr.Route.DisplayName()), strings.Join(paths, ", "))
 			if u := format.RouteURL(mr.Route.ID, ctx); u != "" {
 				line += "\n    " + u
 			}
