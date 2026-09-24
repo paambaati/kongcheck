@@ -71,15 +71,24 @@ const (
 
 var (
 	bearerRe = regexp.MustCompile(`(?i)Bearer\s+\S+`)
-	// Kong personal access tokens may appear bare in URLs or error text.
-	kpatRe = regexp.MustCompile(`kpat_[A-Za-z0-9_-]+`)
+	// Kong personal access tokens (kpat_) and system account access tokens (spat_).
+	kpatRe = regexp.MustCompile(`(?:kpat|spat)_[A-Za-z0-9_-]+`)
 )
 
-// RedactBearer replaces Bearer credentials and bare Kong PATs in s with a
+// RedactBearer replaces Bearer credentials and bare Kong PATs/SAATs in s with a
 // placeholder so tokens never reach logs, errors, or MCP tool results.
 func RedactBearer(s string) string {
 	s = bearerRe.ReplaceAllString(s, "Bearer [REDACTED]")
 	return kpatRe.ReplaceAllString(s, "[REDACTED]")
+}
+
+// RedactToken redacts Bearer tokens, Kong PATs/SAATs, and any explicit token string.
+func RedactToken(s, token string) string {
+	s = RedactBearer(s)
+	if token != "" {
+		s = strings.ReplaceAll(s, token, "[REDACTED]")
+	}
+	return s
 }
 
 // APIError is returned when the Konnect API responds with a non-2xx status.
@@ -335,7 +344,7 @@ func (c *Client) fetchPage(ctx context.Context, rawURL, token string, out any) e
 			return nil
 		}
 
-		text := RedactBearer(string(body))
+		text := RedactToken(string(body), token)
 		if len(text) > maxErrorBody {
 			text = text[:maxErrorBody] + "... (truncated)"
 		}
@@ -369,14 +378,17 @@ func (c *Client) get(ctx context.Context, rawURL, token string) (int, http.Heade
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return 0, nil, nil, errors.New(RedactBearer(err.Error()))
+		return 0, nil, nil, errors.New(RedactToken(err.Error(), token))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// Cap how much we buffer so a hostile or misbehaving endpoint cannot
-	// exhaust memory; maxResponseBytes still leaves room for large pages.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	// exhaust memory; read up to maxResponseBytes + 1 to detect truncation.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		body = []byte("(unreadable body)")
+		return 0, nil, nil, errors.New(RedactToken(fmt.Sprintf("reading response from %s: %v", rawURL, err), token))
+	}
+	if int64(len(body)) > maxResponseBytes {
+		return 0, nil, nil, fmt.Errorf("response body from %s exceeded %d bytes limit", rawURL, maxResponseBytes)
 	}
 	return resp.StatusCode, resp.Header, body, nil
 }

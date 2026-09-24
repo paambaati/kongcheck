@@ -27,19 +27,19 @@ func NewLocalConfigDump(data *model.KonnectData) LocalConfigDump {
 
 // LoadLocalConfig loads a config dump from a JSON file for offline analysis.
 // The path "-" reads from standard input, so `dump-config -` can be piped
-// straight into `analyze --file -`.
+// straight into `analyze --file -`. Stdin reads are bounded by maxResponseBytes.
 func LoadLocalConfig(filePath string) (*model.KonnectData, error) {
 	var (
 		b   []byte
 		err error
 	)
 	if filePath == "-" {
-		b, err = io.ReadAll(os.Stdin)
+		b, err = io.ReadAll(io.LimitReader(os.Stdin, maxResponseBytes))
 	} else {
 		b, err = os.ReadFile(filePath)
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading local config %q: %w", filePath, err)
 	}
 	return ParseLocalConfig(b)
 }

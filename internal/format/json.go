@@ -134,10 +134,12 @@ func CSV(findings []*model.Finding, ctx *KonnectContext) string {
 
 // csvQuoted quotes a CSV field per RFC 4180 and prefixes formula-like values
 // with `'` so spreadsheets do not execute them (OWASP CSV injection).
+// Leading whitespace is trimmed when inspecting the formula prefix to prevent bypass.
 func csvQuoted(v string) string {
-	if v != "" {
-		switch v[0] {
-		case '=', '+', '-', '@', '\t', '\r':
+	trimmed := strings.TrimLeft(v, " \t\r\n")
+	if trimmed != "" {
+		switch trimmed[0] {
+		case '=', '+', '-', '@':
 			v = "'" + v
 		}
 	}

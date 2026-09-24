@@ -38,6 +38,28 @@ func TestClient_RedactBearer(t *testing.T) {
 		}
 	})
 
+	t.Run("bare Kong system account access tokens", func(t *testing.T) {
+		msg := "error connecting with spat_system_token_xyz987 to control plane"
+		redacted := client.RedactBearer(msg)
+		if strings.Contains(redacted, "spat_system_token_xyz987") {
+			t.Fatalf("expected bare SAAT redacted, got %s", redacted)
+		}
+		if !strings.Contains(redacted, "[REDACTED]") {
+			t.Fatalf("expected [REDACTED] placeholder, got %s", redacted)
+		}
+	})
+
+	t.Run("RedactToken redacts explicit custom token", func(t *testing.T) {
+		msg := "request with custom-secret-token failed"
+		redacted := client.RedactToken(msg, "custom-secret-token")
+		if strings.Contains(redacted, "custom-secret-token") {
+			t.Fatalf("expected custom token redacted, got %s", redacted)
+		}
+		if !strings.Contains(redacted, "[REDACTED]") {
+			t.Fatalf("expected [REDACTED] placeholder, got %s", redacted)
+		}
+	})
+
 	t.Run("Authorization header value with PAT", func(t *testing.T) {
 		msg := "Authorization: Bearer kpat_live_secret_value"
 		redacted := client.RedactBearer(msg)
