@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 	"github.com/paambaati/kongcheck/internal/filter"
 	"github.com/paambaati/kongcheck/internal/model"
 	"github.com/paambaati/kongcheck/internal/router"
+	"github.com/paambaati/kongcheck/internal/strutil"
 	"github.com/paambaati/kongcheck/internal/urlutil"
 )
 
@@ -106,9 +106,11 @@ func (s *Server) addTool(t Tool) {
 }
 
 // Serve runs the MCP server over stdio until stdin EOF or context cancellation.
-func Serve(opts Options) error {
+// The context is threaded into every tool handler (and thus Konnect fetches)
+// so SIGINT/cancellation aborts in-flight work.
+func Serve(ctx context.Context, opts Options) error {
 	s := New(opts)
-	return s.ServeIO(context.Background(), os.Stdin, os.Stdout)
+	return s.ServeIO(ctx, os.Stdin, os.Stdout)
 }
 
 // JSON-RPC 2.0 messages
@@ -127,6 +129,8 @@ type jsonRPCError struct {
 }
 
 // ServeIO runs the JSON-RPC loop reading from in and writing to out.
+// Cancelling ctx stops between messages and aborts in-flight tool handlers;
+// blocked reads on in only end when the reader returns (stdin EOF or close).
 func (s *Server) ServeIO(ctx context.Context, in io.Reader, out io.Writer) error {
 	scanner := bufio.NewScanner(in)
 	// Allow large messages up to 16MB
@@ -146,6 +150,9 @@ func (s *Server) ServeIO(ctx context.Context, in io.Reader, out io.Writer) error
 	}
 
 	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
@@ -153,8 +160,10 @@ func (s *Server) ServeIO(ctx context.Context, in io.Reader, out io.Writer) error
 
 		var req jsonRPCMessage
 		if err := json.Unmarshal(line, &req); err != nil {
+			// JSON-RPC requires id: null when the id cannot be parsed.
 			_ = send(&jsonRPCMessage{
 				JSONRPC: "2.0",
+				ID:      json.RawMessage("null"),
 				Error:   &jsonRPCError{Code: -32700, Message: "Parse error"},
 			})
 			continue
@@ -169,6 +178,8 @@ func (s *Server) ServeIO(ctx context.Context, in io.Reader, out io.Writer) error
 				JSONRPC: "2.0",
 				ID:      req.ID,
 				Result: map[string]any{
+					// Fixed protocol revision we implement; clients negotiate
+					// down via their own protocolVersion if needed.
 					"protocolVersion": "2025-06-18",
 					"capabilities": map[string]any{
 						"tools": map[string]any{"listChanged": true},
@@ -274,19 +285,17 @@ func (s *Server) ServeIO(ctx context.Context, in io.Reader, out io.Writer) error
 
 // --- arguments & validation -------------------------------------------------
 
-var uuidRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
 type targetArgs struct {
 	ControlPlaneID string `json:"controlPlaneId"`
 	Region         string `json:"region"`
 }
 
 func (a targetArgs) validate() error {
-	if a.ControlPlaneID != "" && !uuidRe.MatchString(a.ControlPlaneID) {
+	if a.ControlPlaneID != "" && !strutil.IsUUID(a.ControlPlaneID) {
 		return fmt.Errorf("controlPlaneId: invalid UUID %q", a.ControlPlaneID)
 	}
-	if a.Region != "" && !slices.Contains(client.RegionCodes, a.Region) {
-		return fmt.Errorf("region: expected one of %s, got %q", strings.Join(client.RegionCodes, ", "), a.Region)
+	if a.Region != "" && !slices.Contains(client.RegionCodes(), a.Region) {
+		return fmt.Errorf("region: expected one of %s, got %q", strings.Join(client.RegionCodes(), ", "), a.Region)
 	}
 	return nil
 }
@@ -459,11 +468,20 @@ func (s *Server) handleExplain(ctx context.Context, argsRaw json.RawMessage) (st
 	sorted := s.cache.SortedRoutes(CacheKey(cfg), data, flavor)
 
 	normalized := urlutil.NormalizePath(*args.Path)
+	// HTTP header names are case-insensitive; normalise to lowercase so
+	// constraints keyed lower (or mixed) always resolve, matching the CLI.
+	reqHeaders := args.Headers
+	if reqHeaders != nil {
+		reqHeaders = make(map[string]string, len(args.Headers))
+		for k, v := range args.Headers {
+			reqHeaders[strings.ToLower(k)] = v
+		}
+	}
 	res := router.SimulateRequest(sorted, router.SimRequest{
-		Method:     firstNonEmpty(args.Method, "GET"),
-		Host:       firstNonEmpty(args.Host, "example.com"),
+		Method:     strutil.FirstNonEmpty(args.Method, "GET"),
+		Host:       strutil.FirstNonEmpty(args.Host, "example.com"),
 		Path:       normalized,
-		Headers:    args.Headers,
+		Headers:    reqHeaders,
 		SNI:        args.SNI,
 		SourceIP:   args.SourceIP,
 		SourcePort: sourcePort,

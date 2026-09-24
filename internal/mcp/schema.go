@@ -43,7 +43,7 @@ var targetProps = schemaProps{
 	},
 	"region": map[string]any{
 		"type":        "string",
-		"enum":        client.RegionCodes,
+		"enum":        client.RegionCodes(),
 		"description": `Konnect region. Defaults to KONNECT_REGION environment variable or "us".`,
 	},
 }
@@ -74,7 +74,8 @@ var filterProps = schemaProps{
 			},
 			"required": []string{"key", "value"},
 		},
-		"description": "Filter findings to routes matching all given key/value pairs (ANDed). " +
+		"description": "Filter findings. Entries combine as AND across different keys and OR within the same key " +
+			"(e.g. two tag filters match either tag). A finding is kept when ANY involved route satisfies the full set. " +
 			"Supported keys: " + strings.Join([]string{"path", "name", "service", "tag", "id"}, ", ") + ".",
 	},
 }

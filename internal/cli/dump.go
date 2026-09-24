@@ -82,7 +82,7 @@ func (a *App) newMCPCommand() *cobra.Command {
 				}
 				ttl = time.Duration(secs * float64(time.Second))
 			}
-			return mcp.Serve(mcp.Options{Name: version.Name, Version: version.Version, CacheTTL: ttl})
+			return mcp.Serve(cmd.Context(), mcp.Options{Name: version.Name, Version: version.Version, CacheTTL: ttl})
 		},
 	}
 	cmd.Flags().StringVar(&cacheTTL, "cache-ttl", "", "Seconds to cache fetched Konnect config per control-plane within a session. 0 disables caching. (default: 60)")

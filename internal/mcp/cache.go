@@ -1,14 +1,3 @@
-// Package mcp exposes route analysis and request simulation as Model Context
-// Protocol tools so AI agents can call them directly.
-//
-// Transport is stdio: the MCP host spawns `kongcheck mcp` and speaks JSON-RPC
-// over stdin/stdout.
-//
-// Authentication: KONNECT_TOKEN is read from the environment (set once in the
-// MCP host config; it never travels over the MCP wire). controlPlaneId and
-// region are optional per-call parameters falling back to
-// KONNECT_CONTROL_PLANE_ID and KONNECT_REGION (default "us"), so an agent can
-// query several control planes in one session.
 package mcp
 
 import (
@@ -20,6 +9,7 @@ import (
 
 	"github.com/paambaati/kongcheck/internal/model"
 	"github.com/paambaati/kongcheck/internal/router"
+	"github.com/paambaati/kongcheck/internal/strutil"
 )
 
 // ResolveParams are the per-call connection parameters of a tool call.
@@ -37,22 +27,13 @@ func ResolveConfig(p ResolveParams) (model.KonnectConfig, error) {
 		return model.KonnectConfig{}, errors.New("KONNECT_TOKEN environment variable is not set. " +
 			"Configure it in your MCP host config so it is available to kongcheck.")
 	}
-	cpID := firstNonEmpty(p.ControlPlaneID, os.Getenv("KONNECT_CONTROL_PLANE_ID"))
+	cpID := strutil.FirstNonEmpty(p.ControlPlaneID, os.Getenv("KONNECT_CONTROL_PLANE_ID"))
 	if cpID == "" {
 		return model.KonnectConfig{}, errors.New("controlPlaneId was not provided in the tool call and " +
 			"KONNECT_CONTROL_PLANE_ID environment variable is not set.")
 	}
-	region := firstNonEmpty(p.Region, os.Getenv("KONNECT_REGION"), "us")
+	region := strutil.FirstNonEmpty(p.Region, os.Getenv("KONNECT_REGION"), "us")
 	return model.KonnectConfig{Token: token, ControlPlaneID: cpID, Region: region}, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }
 
 // FetchFunc fetches a control plane's configuration.
@@ -108,11 +89,15 @@ func (c *Cache) Fetch(ctx context.Context, cfg model.KonnectConfig, ttl time.Dur
 		return nil, err
 	}
 
+	// Stamp after the fetch returns so TTL is measured from when the data
+	// actually landed, not from when the request started (slow fetches would
+	// otherwise look older than they are).
+	fetchedAt := c.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[key] = &CacheEntry{Data: data, FetchedAt: now}
+	c.entries[key] = &CacheEntry{Data: data, FetchedAt: fetchedAt}
 	for k, e := range c.entries {
-		if k != key && now.Sub(e.FetchedAt) >= ttl {
+		if k != key && fetchedAt.Sub(e.FetchedAt) >= ttl {
 			delete(c.entries, k)
 		}
 	}
