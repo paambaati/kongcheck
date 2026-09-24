@@ -20,7 +20,7 @@ package router
 import (
 	"fmt"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/paambaati/kongcheck/internal/model"
@@ -241,9 +241,9 @@ func MarshalRoute(route *model.KongRoute, service *model.KongService, flavor mod
 		}
 	}
 
-	sorted := append([]string(nil), route.Paths...)
-	sort.Strings(sorted)
-	mr.PathFingerprint = strings.Join(sorted, "|")
+	sorted := slices.Clone(route.Paths)
+	slices.Sort(sorted)
+	mr.PathFingerprint = strings.Join(sorted, "\x00")
 
 	return mr
 }

@@ -144,7 +144,7 @@ func overlapSample(src, dst *router.MarshalledRoute) (string, bool) {
 			} else if m, ok := p.Regex.FindString(sample); ok {
 				matchEnd = utf8.RuneCountInString(m)
 			}
-			if !isCleanBoundary([]rune(sample), matchEnd) {
+			if !isCleanBoundary(sample, matchEnd) {
 				return sample, true
 			}
 		}
@@ -152,9 +152,43 @@ func overlapSample(src, dst *router.MarshalledRoute) (string, bool) {
 	return "", false
 }
 
-func isCleanBoundary(sample []rune, matchEnd int) bool {
-	if matchEnd >= len(sample) || sample[matchEnd] == '/' {
+func isCleanBoundary(sample string, matchEnd int) bool {
+	if matchEnd >= len(sample) {
 		return true
 	}
-	return matchEnd > 0 && sample[matchEnd-1] == '/'
+	// Fast path for ASCII URLs (no allocations).
+	isASCII := true
+	for i := 0; i < len(sample); i++ {
+		if sample[i] >= utf8.RuneSelf {
+			isASCII = false
+			break
+		}
+	}
+	if isASCII {
+		if sample[matchEnd] == '/' {
+			return true
+		}
+		return matchEnd > 0 && sample[matchEnd-1] == '/'
+	}
+
+	// For non-ASCII, decode runes without slice allocation.
+	var prevRune, curRune rune
+	runeIdx := 0
+	for _, r := range sample {
+		if runeIdx == matchEnd-1 {
+			prevRune = r
+		}
+		if runeIdx == matchEnd {
+			curRune = r
+			break
+		}
+		runeIdx++
+	}
+	if runeIdx < matchEnd {
+		return true
+	}
+	if curRune == '/' {
+		return true
+	}
+	return matchEnd > 0 && prevRune == '/'
 }

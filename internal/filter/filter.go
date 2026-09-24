@@ -109,10 +109,15 @@ func RouteMatches(route *model.KongRoute, service *model.KongService, p Predicat
 	return false
 }
 
-// RouteMatchesAll applies AND across keys and OR within a key. An empty
-// predicate set matches every route.
-func RouteMatchesAll(route *model.KongRoute, service *model.KongService, preds []Predicate) bool {
-	// Group values by key, keeping first-seen key order.
+// FilterSet groups predicates by key for efficient repeated matching without
+// per-route map allocations.
+type FilterSet struct {
+	order  []Key
+	groups map[Key][]Predicate
+}
+
+// NewFilterSet groups predicates by key, preserving first-seen key order.
+func NewFilterSet(preds []Predicate) FilterSet {
 	var order []Key
 	groups := make(map[Key][]Predicate)
 	for _, p := range preds {
@@ -121,8 +126,13 @@ func RouteMatchesAll(route *model.KongRoute, service *model.KongService, preds [
 		}
 		groups[p.Key] = append(groups[p.Key], p)
 	}
-	for _, k := range order {
-		if !slices.ContainsFunc(groups[k], func(p Predicate) bool {
+	return FilterSet{order: order, groups: groups}
+}
+
+// Matches tests whether route satisfies all key groups in the filter set.
+func (fs FilterSet) Matches(route *model.KongRoute, service *model.KongService) bool {
+	for _, k := range fs.order {
+		if !slices.ContainsFunc(fs.groups[k], func(p Predicate) bool {
 			return RouteMatches(route, service, p)
 		}) {
 			return false
@@ -131,16 +141,26 @@ func RouteMatchesAll(route *model.KongRoute, service *model.KongService, preds [
 	return true
 }
 
+// RouteMatchesAll applies AND across keys and OR within a key. An empty
+// predicate set matches every route.
+func RouteMatchesAll(route *model.KongRoute, service *model.KongService, preds []Predicate) bool {
+	if len(preds) == 0 {
+		return true
+	}
+	return NewFilterSet(preds).Matches(route, service)
+}
+
 // Apply keeps findings where any involved route satisfies all predicates, so
 // a cross-team collision still surfaces when filtering to your own service.
 func Apply(findings []*model.Finding, preds []Predicate, services *model.ServiceIndex) []*model.Finding {
 	if len(preds) == 0 {
 		return findings
 	}
+	fs := NewFilterSet(preds)
 	out := make([]*model.Finding, 0, len(findings))
 	for _, f := range findings {
 		if slices.ContainsFunc(f.Routes, func(r *model.KongRoute) bool {
-			return RouteMatchesAll(r, services.Get(r.ServiceID()), preds)
+			return fs.Matches(r, services.Get(r.ServiceID()))
 		}) {
 			out = append(out, f)
 		}

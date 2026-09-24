@@ -82,17 +82,34 @@ var suspiciousPatterns = []suspiciousPattern{
 	},
 }
 
-// DetectSuspiciousRegexIssues returns a description for every known
-// anti-pattern in a regex path. Plain paths (no `~`) are never flagged.
-func DetectSuspiciousRegexIssues(raw string) []string {
-	issues := []string{}
+// EvaluateSuspiciousRegex checks raw against all known suspicious patterns in
+// a single pass, returning all issues, the first suggested fix, and the overall
+// severity (HIGH if any matching pattern is HIGH, else MEDIUM).
+func EvaluateSuspiciousRegex(raw string) (issues []string, fix string, severity model.Severity) {
+	severity = model.SeverityMedium
 	if !strings.HasPrefix(raw, "~") {
-		return issues
+		return nil, "", severity
 	}
 	for _, p := range suspiciousPatterns {
 		if p.test.MatchString(raw) {
 			issues = append(issues, p.description)
+			if fix == "" && p.suggestion != nil {
+				fix = p.suggestion(raw)
+			}
+			if p.severity == model.SeverityHigh {
+				severity = model.SeverityHigh
+			}
 		}
+	}
+	return issues, fix, severity
+}
+
+// DetectSuspiciousRegexIssues returns a description for every known
+// anti-pattern in a regex path. Plain paths (no `~`) are never flagged.
+func DetectSuspiciousRegexIssues(raw string) []string {
+	issues, _, _ := EvaluateSuspiciousRegex(raw)
+	if issues == nil {
+		return []string{}
 	}
 	return issues
 }
@@ -100,23 +117,12 @@ func DetectSuspiciousRegexIssues(raw string) []string {
 // SuggestRegexFix returns a safer replacement for a suspicious regex path, or
 // "" when no suggestion applies.
 func SuggestRegexFix(raw string) string {
-	if !strings.HasPrefix(raw, "~") {
-		return ""
-	}
-	for _, p := range suspiciousPatterns {
-		if p.test.MatchString(raw) {
-			return p.suggestion(raw)
-		}
-	}
-	return ""
+	_, fix, _ := EvaluateSuspiciousRegex(raw)
+	return fix
 }
 
 // suspiciousSeverity returns HIGH when any matching pattern is HIGH, else MEDIUM.
 func suspiciousSeverity(raw string) model.Severity {
-	for _, p := range suspiciousPatterns {
-		if p.severity == model.SeverityHigh && p.test.MatchString(raw) {
-			return model.SeverityHigh
-		}
-	}
-	return model.SeverityMedium
+	_, _, sev := EvaluateSuspiciousRegex(raw)
+	return sev
 }

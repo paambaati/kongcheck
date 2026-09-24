@@ -141,12 +141,12 @@ func lintSuspiciousRegex(routes []*router.MarshalledRoute, flavor model.RouterFl
 			if p.Kind != router.PathRegex {
 				continue
 			}
-			issues := DetectSuspiciousRegexIssues(p.Raw)
+			issues, fix, sev := EvaluateSuspiciousRegex(p.Raw)
 			if len(issues) == 0 {
 				continue
 			}
 			suggestions := []string{}
-			if fix := SuggestRegexFix(p.Raw); fix != "" {
+			if fix != "" {
 				suggestions = append(suggestions, fix)
 			}
 			reason := make([]string, 0, len(issues)+3)
@@ -156,7 +156,7 @@ func lintSuspiciousRegex(routes []*router.MarshalledRoute, flavor model.RouterFl
 				"Under "+string(flavor)+" flavor, this path is compiled as: "+p.RegexSource,
 				"The `~` prefix means this is a PCRE regex path, not a glob pattern.")
 			findings = append(findings, &model.Finding{
-				Severity:     suspiciousSeverity(p.Raw),
+				Severity:     sev,
 				Type:         model.FindingSuspiciousRegex,
 				RouterFlavor: flavor,
 				Routes:       []*model.KongRoute{mr.Route},
