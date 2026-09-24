@@ -47,12 +47,6 @@ func RegionCodes() []string {
 	return slices.Clone(regionCodes)
 }
 
-// RegionBaseURL maps a region code to its Konnect API base URL.
-func RegionBaseURL(code string) (string, bool) {
-	u, ok := regions[code]
-	return u, ok
-}
-
 const (
 	// maxPages caps pagination per resource type, guarding against runaway
 	// cursors or unexpectedly large data sets.
