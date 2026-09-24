@@ -6,6 +6,9 @@ project_name: kongcheck
 before:
   hooks:
     - go mod tidy
+    - go mod verify
+    - go vet ./...
+    - go test ./...
 
 builds:
   - env:
@@ -41,6 +44,7 @@ archives:
       - README.md
 
   - id: raw-binaries
+    # Same naming as README download links (no version suffix on purpose).
     name_template: "{{ .ProjectName }}-{{ .Os }}-{{ if eq .Arch \"amd64\" }}x64{{ else }}{{ .Arch }}{{ end }}"
     formats:
       - binary
