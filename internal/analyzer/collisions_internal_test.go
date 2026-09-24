@@ -105,3 +105,55 @@ func TestSimulateAll_LeavesSkippedEntriesNil(t *testing.T) {
 		}
 	}
 }
+
+// TestPrefixCache_MemoizesPerRouteNotPerPair guards against allPrefixes being
+// recomputed from scratch on every (candidate, pair) occurrence instead of
+// once per route. newPrefixCache must hold exactly one entry per route
+// (built in a single pass over the route list), and prefixCache.
+// isHierarchicalChild must behave identically to the pre-memoization
+// standalone implementation.
+func TestPrefixCache_MemoizesPerRouteNotPerPair(t *testing.T) {
+	parent := marshalledRouteWithPrefix("r1", "/chat")
+	child := marshalledRouteWithPrefix("r2", "/chat/history")
+	sibling := marshalledRouteWithPrefix("r4", "/payments-v2")
+	regexRoute := &router.MarshalledRoute{
+		Route: &model.KongRoute{ID: "r3"},
+		ParsedPaths: []router.ParsedPath{
+			{Kind: router.PathRegex, Raw: "~/foo", RegexSource: "/foo"},
+		},
+	}
+	routes := []*router.MarshalledRoute{parent, child, regexRoute, sibling}
+
+	cache := newPrefixCache(routes)
+	if len(cache) != len(routes) {
+		t.Fatalf("expected exactly one cache entry per route, got %d entries for %d routes", len(cache), len(routes))
+	}
+
+	if r1 := cache["r1"]; !r1.ok || len(r1.prefixes) != 1 || r1.prefixes[0] != "/chat" {
+		t.Errorf("unexpected cache entry for r1: %+v", r1)
+	}
+	if r3 := cache["r3"]; r3.ok {
+		t.Errorf("expected a regex-path route to have ok=false, got %+v", r3)
+	}
+
+	if !cache.isHierarchicalChild(child, parent) {
+		t.Error("expected child (/chat/history) to be classified as a hierarchical child of parent (/chat)")
+	}
+	if cache.isHierarchicalChild(parent, child) {
+		t.Error("expected parent (/chat) to NOT be classified as a hierarchical child of child (/chat/history)")
+	}
+	if cache.isHierarchicalChild(sibling, parent) {
+		t.Error("expected unrelated sibling paths (/chat vs /payments-v2) to not be classified as hierarchical")
+	}
+	if cache.isHierarchicalChild(regexRoute, parent) || cache.isHierarchicalChild(parent, regexRoute) {
+		t.Error("expected a regex-path route to never be classified as hierarchical (allPrefixes requires all-plain-prefix)")
+	}
+
+	// Looking up the same pair repeatedly (as detectCollisions does across
+	// many candidate requests) must be stable and side-effect-free.
+	for range 5 {
+		if !cache.isHierarchicalChild(child, parent) {
+			t.Fatal("expected isHierarchicalChild to be stable across repeated calls for the same pair")
+		}
+	}
+}

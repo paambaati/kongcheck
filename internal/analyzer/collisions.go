@@ -73,6 +73,14 @@ func detectCollisions(ctx context.Context, sorted []*router.MarshalledRoute, fla
 	candidates := GenerateCandidateRequests(sorted)
 	results := simulateAll(ctx, sorted, candidates)
 
+	// allPrefixes is a pure function of a route's own paths, but the same
+	// (winner, loser) pair recurs across many candidate requests —
+	// GenerateCandidateRequests deliberately produces siblings/children/
+	// parents of the same base paths — so computing it fresh per occurrence
+	// reallocates the same two prefix slices over and over. Precompute it
+	// once per route instead.
+	prefixes := newPrefixCache(sorted)
+
 	seen := make(map[pairKey]bool)
 	byPair := make(map[pairKey]*model.Finding)
 	findings := []*model.Finding{}
@@ -98,7 +106,7 @@ func detectCollisions(ctx context.Context, sorted []*router.MarshalledRoute, fla
 			}
 			// Parent → child hierarchies (/chat vs /chat/history) are resolved
 			// deterministically by max_uri_length.
-			if isHierarchicalChild(winner, loser) {
+			if prefixes.isHierarchicalChild(winner, loser) {
 				continue
 			}
 			// Split paths of the same multi-path route are not a collision.
@@ -169,25 +177,47 @@ func detectCollisions(ctx context.Context, sorted []*router.MarshalledRoute, fla
 	return findings
 }
 
+// prefixCache memoizes each route's allPrefixes result (keyed by route ID),
+// computed once per route rather than once per (candidate, pair)
+// occurrence — the same pair can recur across many candidate requests, and
+// allPrefixes is a pure function of the route's own paths.
+type prefixCache map[string]prefixResult
+
+// prefixResult is one route's memoized allPrefixes outcome.
+type prefixResult struct {
+	prefixes []string
+	ok       bool
+}
+
+// newPrefixCache precomputes allPrefixes for every route.
+func newPrefixCache(routes []*router.MarshalledRoute) prefixCache {
+	c := make(prefixCache, len(routes))
+	for _, mr := range routes {
+		prefixes, ok := allPrefixes(mr)
+		c[mr.Route.ID] = prefixResult{prefixes: prefixes, ok: ok}
+	}
+	return c
+}
+
 // isHierarchicalChild reports whether loser is a proper path-segment ancestor
 // of winner (e.g. /chat vs /chat/history, but not /payments vs /payments-v2).
 // Such parent → child hierarchies are resolved deterministically by Kong's
 // max_uri_length tie-breaker. Only applies when both routes are exclusively
 // plain-prefix.
-func isHierarchicalChild(winner, loser *router.MarshalledRoute) bool {
-	loserPrefixes, ok := allPrefixes(loser)
-	if !ok {
+func (c prefixCache) isHierarchicalChild(winner, loser *router.MarshalledRoute) bool {
+	lp := c[loser.Route.ID]
+	if !lp.ok {
 		return false
 	}
-	winnerPrefixes, ok := allPrefixes(winner)
-	if !ok {
+	wp := c[winner.Route.ID]
+	if !wp.ok {
 		return false
 	}
-	for _, lp := range loserPrefixes {
+	for _, l := range lp.prefixes {
 		// Strip a trailing '/' first to avoid a double slash (/api/ vs /api/ws).
-		boundary := strings.TrimSuffix(lp, "/") + "/"
-		for _, wp := range winnerPrefixes {
-			if !strings.HasPrefix(wp, boundary) {
+		boundary := strings.TrimSuffix(l, "/") + "/"
+		for _, w := range wp.prefixes {
+			if !strings.HasPrefix(w, boundary) {
 				return false
 			}
 		}
