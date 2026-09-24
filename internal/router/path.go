@@ -234,7 +234,10 @@ func MarshalRoute(route *model.KongRoute, service *model.KongService, flavor mod
 			mr.HeaderCount++
 		}
 		if len(h.Values) == 1 && strings.HasPrefix(h.Values[0], "~*") {
-			mr.HeaderPatterns[strings.ToLower(h.Name)] = CompilePattern(h.Values[0][2:])
+			// (?i): Kong treats ~* header regexes as case-insensitive; without
+			// it a pattern with uppercase literals never matches the lowercased
+			// request value we compare against.
+			mr.HeaderPatterns[strings.ToLower(h.Name)] = CompilePattern("(?i)" + h.Values[0][2:])
 		}
 	}
 

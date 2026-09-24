@@ -791,6 +791,17 @@ func TestRouterA(t *testing.T) {
 			if got := router.MatchRoute(mr, &req1); got != true {
 				t.Errorf("x-version=v3 matches regex ^v[0-9]+$: got %v, want true", got)
 			}
+
+			// Case-insensitive: pattern with uppercase literals vs lowercased value.
+			reqUpperPat := router.SimRequest{Method: "GET", Host: "example.com", Path: "/api", Headers: map[string]string{"x-env": "prod"}}
+			mrUpper := makeRoute(model.KongRoute{
+				ID:      "r-hdr-regex-upper",
+				Paths:   []string{"/api"},
+				Headers: model.Headers{model.HeaderConstraint{Name: "x-env", Values: []string{"~*^PROD$"}}},
+			})
+			if got := router.MatchRoute(mrUpper, &reqUpperPat); got != true {
+				t.Errorf("~*^PROD$ must match value prod (case-insensitive): got %v, want true", got)
+			}
 			req2 := router.SimRequest{Method: "GET", Host: "example.com", Path: "/api", Headers: map[string]string{"x-version": "beta"}}
 			if got := router.MatchRoute(mr, &req2); got != false {
 				t.Errorf("x-version=beta does not match regex ^v[0-9]+$: got %v, want false", got)
